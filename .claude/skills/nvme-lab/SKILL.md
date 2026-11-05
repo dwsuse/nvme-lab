@@ -30,6 +30,14 @@ $L scratch HOST [--rm NAME...]             # list / remove scratch trees
   `tumbleweed`, and `lab ci debian N -- scripts/build.sh -m muon`.
   `--pull` first if the image may be old. Default Docker network on
   nvme has no DNS: for apt/pip use `docker run --network host` via ssh.
+- nvme has docker, not podman. Screenshots of a static HTML page (no
+  browser on the workstation): copy the site to `/root/scratch/N` and run
+  the bundled Chromium of `mcr.microsoft.com/playwright/python:v1.58.0-noble`
+  (`docker run --rm -v /root/scratch/N:/w IMAGE sh -c '/ms-playwright/chromium-*/chrome-linux64/chrome
+  --headless --no-sandbox --hide-scrollbars --window-size=1280,2600
+  --screenshot=/w/shot.png file:///w/site/index.html'`; dark scheme: add
+  `--force-dark-mode --blink-settings=preferredColorScheme=0`). The image
+  has no playwright Python package and no PyPI access.
 - FreeBSD: `lab sync nvme-bsd -n N`, then `meson setup .build && ninja
   -C .build && meson test -C .build` in `/root/scratch/N`.
 - NVMe/TCP: `nvmet-target add-subsys NQN --no-auth --host HOSTNQN` on
