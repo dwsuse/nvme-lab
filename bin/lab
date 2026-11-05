@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+# lab: drive the nvme-cli test VMs from a workstation, see 'lab --help'.
+# Python >= 3.11, standard library only; runs from the checkout (symlink
+# it into ~/bin or put bin/ on PATH).
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(
+    __file__))))
+
+from nvmelab.cli import main  # noqa: E402
+
+sys.exit(main())

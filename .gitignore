@@ -3,3 +3,4 @@
 !*keys*.md
 secrets/
 *.img
+__pycache__/

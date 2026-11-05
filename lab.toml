@@ -1,0 +1,18 @@
+# The lab VMs, read by 'lab' (bin/lab). 'lab' logs in with ssh as
+# root; the key comes from LAB_SSH_KEY or ~/.config/nvme-lab/config.toml
+# (ssh_key = "~/.ssh/..."), else from ssh's own config.
+#
+# A host's name is what the lab commands take ('lab ssh nvmet').
+#   address      what ssh connects to (default: NAME.lan)
+#   description  one line for 'lab hosts'
+#   ci           true: has docker for 'lab ci' (nvme-cli's CI images)
+
+[hosts.nvme]
+description = "NVMe-oF host: nvme-cli, blktests, nvmf-failover; docker for CI images"
+ci = true
+
+[hosts.nvmet]
+description = "NVMe/TCP target: nvmet-target, namespaces on vdb/vdc"
+
+[hosts.nvme-bsd]
+description = "FreeBSD: nvme-cli's FreeBSD port, QEMU NVMe disk"
