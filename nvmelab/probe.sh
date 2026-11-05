@@ -14,12 +14,13 @@ have()
 	command -v "$1" >/dev/null 2>&1
 }
 
-# out KEY VALUE...: one line, words squeezed, nothing for an empty value
+# out KEY VALUE...: one line, words squeezed, nothing for an empty value;
+# a value of several lines (one address per line) becomes one line
 out()
 {
 	key=$1
 	shift
-	val=$(echo "$*" | tr -s ' \t' '  ' | sed 's/^ //; s/ $//')
+	val=$(echo "$*" | tr -s ' \t\n' '   ' | sed 's/^ //; s/ $//')
 	[ -n "${val}" ] && printf '%s\t%s\n' "${key}" "${val}"
 }
 

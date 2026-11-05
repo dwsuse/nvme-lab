@@ -135,6 +135,18 @@ class InventoryTest(unittest.TestCase):
         self.assertIn('=== a', text)
         self.assertIn('timeout', text)
 
+    def test_probe_out_one_line(self):
+        # A value of several lines (one address per line from ip or
+        # ifconfig on a host with several) is one line of the inventory.
+        src = inventory.PROBE.read_text(encoding='utf-8')
+        start = src.index('out()\n')
+        func = src[start:src.index('\n}\n', start) + 3]
+        script = func + 'out address "$(printf \'%s\\n\' 10.0.0.1 10.0.0.2)"\n'
+        p = subprocess.run(['sh', '-c', script], capture_output=True,
+                           encoding='utf-8', timeout=10)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout, 'address\t10.0.0.1 10.0.0.2\n')
+
     def test_probe_runs_here(self):
         # The probe is read only; it must run on any POSIX system.
         p = subprocess.run(['sh', str(inventory.PROBE)], capture_output=True,
