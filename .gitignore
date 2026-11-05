@@ -1,0 +1,5 @@
+# Keys never go into this repo (see README, "Secrets").
+*keys*
+!*keys*.md
+secrets/
+*.img

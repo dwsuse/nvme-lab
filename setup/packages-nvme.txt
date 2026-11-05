@@ -1,0 +1,24 @@
+# nvme (NVMe-oF host, nvme-cli/libnvme/libblockdev development), Debian.
+# From the old VM's apt-mark showmanual (2026-11-05), minus the base image.
+# Names for trixie; the old VM was bookworm (libncurses5-dev → libncurses-dev).
+
+# build
+build-essential clang meson ninja-build pkg-config autoconf autoconf-archive automake libtool bison flex git tig
+# nvme-cli / libnvme
+libjson-c-dev libssl-dev libkeyutils-dev libsystemd-dev libarchive-dev libnl-genl-3-dev uuid-dev python3-dev
+# nvme-cli docs
+asciidoc-base xmlto docbook-xsl xsltproc python3-sphinx python3-sphinx-rtd-theme
+# libblockdev
+gobject-introspection libgirepository1.0-dev libglib2.0-dev gtk-doc-tools libbytesize-dev python3-bytesize
+libblkid-dev libmount-dev libcryptsetup-dev libdevmapper-dev libext2fs-dev comerr-dev libfdisk-dev libjson-glib-dev
+libndctl-dev libnss3-dev libparted-dev libvolume-key-dev libyaml-dev libatasmart-dev libkmod-dev libudev-dev
+python3-gi python3-yaml python3-packaging
+# cross builds (cross-*/ana-test.sh: ubuntu-cross containers)
+gcc-arm-linux-gnueabihf gcc-powerpc64le-linux-gnu gcc-s390x-linux-gnu qemu-user-static docker.io
+# i386: dpkg --add-architecture i386, then libjson-c-dev:i386
+# development kernels (setup/kernel.sh)
+bc cpio kmod rsync dwarves libelf-dev libncurses-dev
+# nvmetcli, ktls-utils (tlshd) from source
+python3-configshell-fb python3-venv python3-pip libgnutls28-dev
+# testing
+fio valgrind strace tcpdump ethtool socat jq keyutils psmisc zstd lz4 uuid-runtime

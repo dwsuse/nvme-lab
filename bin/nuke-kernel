@@ -1,0 +1,84 @@
+#!/bin/bash
+
+set -e
+
+current_kernel=$(uname -r)
+
+echo "Scanning /boot for manually installed kernels..."
+
+# Helper function to check if a file is owned by a package
+is_packaged_file() {
+    local file="$1"
+    if command -v rpm &>/dev/null; then
+        rpm -qf "$file" &>/dev/null
+        return $?
+    elif command -v dpkg &>/dev/null; then
+        dpkg -S "$file" &>/dev/null
+        return $?
+    else
+        return 1  # unknown, assume not packaged
+    fi
+}
+
+# Find all /boot/vmlinuz-* files that are not the current kernel and not packaged
+declare -a manual_kernels=()
+for f in /boot/vmlinuz-*; do
+    [ -f "$f" ] || continue
+    ver="${f#/boot/vmlinuz-}"
+
+    [[ "$ver" == "$current_kernel" ]] && continue
+
+    if ! is_packaged_file "$f"; then
+        manual_kernels+=("$ver")
+    fi
+done
+
+if [ ${#manual_kernels[@]} -eq 0 ]; then
+    echo "No manually installed kernels found."
+    exit 0
+fi
+
+echo "Found manually installed kernels:"
+for i in "${!manual_kernels[@]}"; do
+    echo "[$i] ${manual_kernels[$i]}"
+done
+
+read -p "Enter the number of the kernel to remove: " index
+
+if ! [[ "$index" =~ ^[0-9]+$ ]] || [ "$index" -ge "${#manual_kernels[@]}" ]; then
+    echo "Invalid selection."
+    exit 1
+fi
+
+kernel_ver="${manual_kernels[$index]}"
+echo "Removing kernel version: $kernel_ver"
+
+# Remove related /boot files
+for prefix in vmlinuz initrd System.map config; do
+    file="/boot/${prefix}-${kernel_ver}"
+    if [ -f "$file" ]; then
+        echo "Deleting $file"
+        sudo rm -f "$file"
+    fi
+done
+
+# Remove modules
+mod_dir="/lib/modules/${kernel_ver}"
+if [ -d "$mod_dir" ]; then
+    echo "Deleting module directory: $mod_dir"
+    sudo rm -rf "$mod_dir"
+fi
+
+# Update GRUB
+echo "Updating GRUB..."
+if command -v update-grub &>/dev/null; then
+    sudo update-grub
+elif command -v grub-mkconfig &>/dev/null && [ -d /boot/grub ]; then
+    sudo grub-mkconfig -o /boot/grub/grub.cfg
+elif command -v grub2-mkconfig &>/dev/null && [ -d /boot/grub2 ]; then
+    sudo grub2-mkconfig -o /boot/grub2/grub.cfg
+else
+    echo "WARNING: GRUB config not updated (no known tool found)."
+fi
+
+echo "Kernel $kernel_ver has been removed."

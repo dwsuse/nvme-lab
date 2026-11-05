@@ -1,0 +1,404 @@
+#!/bin/bash
+# nvmet-target: manage the NVMe/TCP target in configfs.
+#
+#   nvmet-target up [--tls] [--no-auth]
+#       (Re)create the default target: $SUBSYS on port 0 ($TRADDR:4420),
+#       namespace $DEV, host $HOST with the DH-CHAP keys from $KEYS_FILE.
+#       Other subsystems are kept.
+#   nvmet-target down
+#       Remove the whole target configuration.
+#   nvmet-target add-subsys NQN [--port N] [--trsvcid PORT] [--dev PATH]
+#                [--size SIZE] [--host NQN [--no-auth]]
+#       Add a scratch subsystem on its own port, by default the next free
+#       port id and TCP port from 4421. Without --dev, the namespace is a
+#       sparse file of SIZE (default 1G) in $IMG_DIR.
+#       With --host, only that host is allowed. A new host gets fresh
+#       DH-CHAP keys, which are printed, unless --no-auth is given; an
+#       existing host keeps its keys.
+#   nvmet-target del-subsys NQN
+#       Remove a subsystem, its hosts, ports without other subsystems
+#       and its image file in $IMG_DIR.
+#   nvmet-target status
+#       Show the configuration. Keys are never printed.
+#
+# Options for all commands: -n/--dry-run prints the configfs changes.
+# Environment: SUBSYS, HOST, DEV, TRADDR, KEYS_FILE, IMG_DIR, HASH and
+# DHGROUP override the defaults below. KEYS_FILE defines HOST_KEY and CTRL_KEY (DHHC-1 format,
+# e.g. from 'nvme gen-dhchap-key -m 1').
+
+set -euo pipefail
+
+NVMET=/sys/kernel/config/nvmet
+SUBSYS="${SUBSYS:-nqn.io-1}"
+HOST="${HOST:-nqn.2014-08.org.nvmexpress:uuid:befdec4c-2234-11b2-a85c-ca77c773af36}"
+DEV="${DEV:-/dev/vdb}"
+TRADDR="${TRADDR:-0.0.0.0}"
+KEYS_FILE="${KEYS_FILE:-/root/nvmet-keys}"
+TLS_KEYS="${TLS_KEYS:-/etc/nvme/tls-keys}"
+IMG_DIR="${IMG_DIR:-/var/tmp/nvmet-target}"
+HASH="${HASH:-hmac(sha256)}"
+DHGROUP="${DHGROUP:-null}"
+# Keep the identity of the default target stable across re-creation.
+SERIAL="0c74361069d9db6c65ef"
+NS_UUID="91fdba0d-f87b-4c25-b80f-db7be1418b9e"
+
+DRY_RUN=0
+
+die()
+{
+	echo "nvmet-target: $*" >&2
+	exit 1
+}
+
+usage()
+{
+	sed -n '2,/^$/s/^# \{0,1\}//p' "$0"
+}
+
+run()
+{
+	if [[ "${DRY_RUN}" -eq 1 ]]; then
+		echo "+ $*"
+	else
+		"$@"
+	fi
+}
+
+# set FILE VALUE, keys are not shown in dry-run mode
+set_attr()
+{
+	local file=$1 value=$2
+
+	if [[ "${DRY_RUN}" -eq 1 ]]; then
+		[[ "${value}" == DHHC-1:* ]] && value="DHHC-1:<secret>"
+		echo "+ echo '${value}' > ${file}"
+	else
+		echo "${value}" > "${file}"
+	fi
+}
+
+mk()
+{
+	[[ -d "$1" ]] || run mkdir "$1"
+}
+
+link()
+{
+	[[ -e "$2" ]] || run ln -s "$1" "$2"
+}
+
+new_port()
+{
+	local id=$1 trsvcid=$2 dir="${NVMET}/ports/$1"
+
+	[[ ! -d "${dir}" || "${DRY_RUN}" -eq 1 ]] ||
+		die "port ${id} exists, use --port"
+	mk "${dir}"
+	set_attr "${dir}/addr_trtype" tcp
+	set_attr "${dir}/addr_adrfam" ipv4
+	set_attr "${dir}/addr_traddr" "${TRADDR}"
+	set_attr "${dir}/addr_trsvcid" "${trsvcid}"
+}
+
+new_subsys()
+{
+	local nqn=$1 dev=$2 dir="${NVMET}/subsystems/$1"
+
+	[[ ! -d "${dir}" || "${DRY_RUN}" -eq 1 ]] || die "${nqn} exists"
+	mk "${dir}"
+	set_attr "${dir}/attr_allow_any_host" 1
+	mk "${dir}/namespaces/1"
+	set_attr "${dir}/namespaces/1/device_path" "${dev}"
+}
+
+enable_ns()
+{
+	set_attr "${NVMET}/subsystems/$1/namespaces/1/enable" 1
+}
+
+# allow_host SUBSYS HOST [HOST_KEY CTRL_KEY]
+allow_host()
+{
+	local subsys=$1 host=$2 dir="${NVMET}/hosts/$2"
+
+	mk "${dir}"
+	if [[ $# -eq 4 ]]; then
+		set_attr "${dir}/dhchap_key" "$3"
+		set_attr "${dir}/dhchap_ctrl_key" "$4"
+		set_attr "${dir}/dhchap_hash" "${HASH}"
+		set_attr "${dir}/dhchap_dhgroup" "${DHGROUP}"
+	fi
+	set_attr "${NVMET}/subsystems/${subsys}/attr_allow_any_host" 0
+	link "${dir}" "${NVMET}/subsystems/${subsys}/allowed_hosts/${host}"
+}
+
+# Remove a subsystem and every host no other subsystem allows.
+remove_subsys()
+{
+	local dir="${NVMET}/subsystems/$1" p h o ns name other img
+
+	for p in "${NVMET}"/ports/*/subsystems/"$1"; do
+		[[ -L "${p}" ]] && run rm "${p}"
+	done
+	for h in "${dir}"/allowed_hosts/*; do
+		[[ -L "${h}" ]] || continue
+		name=$(basename "${h}")
+		run rm "${h}"
+		other=0
+		for o in "${NVMET}"/subsystems/*/allowed_hosts/"${name}"; do
+			[[ -L "${o}" && "${o}" != "${h}" ]] && other=1
+		done
+		[[ "${other}" -eq 1 ]] || run rmdir "${NVMET}/hosts/${name}"
+	done
+	for ns in "${dir}"/namespaces/*/; do
+		[[ -d "${ns}" ]] || continue
+		img=$(cat "${ns}device_path")
+		set_attr "${ns}enable" 0
+		run rmdir "${ns}"
+		# only images this script created
+		if [[ "${img}" == "${IMG_DIR}"/*.img && -f "${img}" ]]; then
+			run rm "${img}"
+		fi
+	done
+	run rmdir "${dir}"
+}
+
+# Remove ports which export no subsystem anymore. In dry-run mode, the
+# links are still there, so the ports are not shown.
+remove_empty_ports()
+{
+	local p g
+
+	for p in "${NVMET}"/ports/*/; do
+		[[ -d "${p}" && -z "$(ls "${p}subsystems")" ]] || continue
+		for g in "${p}"ana_groups/*/; do
+			[[ "$(basename "${g}")" == 1 ]] || run rmdir "${g}"
+		done
+		for g in "${p}"referrals/*/; do
+			[[ -d "${g}" ]] && run rmdir "${g}"
+		done
+		run rmdir "${p}"
+	done
+	return 0
+}
+
+cmd_up()
+{
+	local tls=0 auth=1
+
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--tls)		tls=1 ;;
+		--no-auth)	auth=0 ;;
+		*)		die "up: unknown argument $1" ;;
+		esac
+		shift
+	done
+
+	if [[ "${auth}" -eq 1 ]]; then
+		[[ -r "${KEYS_FILE}" ]] ||
+			die "${KEYS_FILE} missing, create it or use --no-auth"
+		# shellcheck source=/dev/null
+		. "${KEYS_FILE}"
+		: "${HOST_KEY:?HOST_KEY not set in ${KEYS_FILE}}"
+		: "${CTRL_KEY:?CTRL_KEY not set in ${KEYS_FILE}}"
+	fi
+
+	run modprobe nvmet-tcp
+	if [[ -d "${NVMET}/subsystems/${SUBSYS}" ]]; then
+		remove_subsys "${SUBSYS}"
+		remove_empty_ports
+	fi
+
+	new_subsys "${SUBSYS}" "${DEV}"
+	set_attr "${NVMET}/subsystems/${SUBSYS}/attr_serial" "${SERIAL}"
+	set_attr "${NVMET}/subsystems/${SUBSYS}/namespaces/1/device_uuid" \
+		"${NS_UUID}"
+	enable_ns "${SUBSYS}"
+	if [[ "${auth}" -eq 1 ]]; then
+		allow_host "${SUBSYS}" "${HOST}" "${HOST_KEY}" "${CTRL_KEY}"
+	else
+		allow_host "${SUBSYS}" "${HOST}"
+	fi
+
+	new_port 0 4420
+	set_attr "${NVMET}/ports/0/param_inline_data_size" 16384
+	if [[ "${tls}" -eq 1 ]]; then
+		set_attr "${NVMET}/ports/0/addr_treq" "not required"
+		set_attr "${NVMET}/ports/0/addr_tsas" tls1.3
+		run nvme keys import -f "${TLS_KEYS}"
+	fi
+	link "${NVMET}/subsystems/${SUBSYS}" \
+		"${NVMET}/ports/0/subsystems/${SUBSYS}"
+}
+
+cmd_down()
+{
+	local s
+
+	for s in "${NVMET}"/subsystems/*/; do
+		[[ -d "${s}" ]] && remove_subsys "$(basename "${s}")"
+	done
+	remove_empty_ports
+	for s in "${NVMET}"/hosts/*/; do
+		[[ -d "${s}" ]] && run rmdir "${s}"
+	done
+	return 0
+}
+
+trsvcid_used()
+{
+	local p
+
+	for p in "${NVMET}"/ports/*/addr_trsvcid; do
+		[[ -f "${p}" && "$(cat "${p}")" == "$1" ]] && return 0
+	done
+	return 1
+}
+
+cmd_add_subsys()
+{
+	local nqn=${1:?add-subsys needs an NQN} port="" trsvcid=""
+	local dev="" size=1G host="" auth=1 hkey ckey
+	shift
+
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--port)		port=${2:?}; shift ;;
+		--trsvcid)	trsvcid=${2:?}; shift ;;
+		--dev)		dev=${2:?}; shift ;;
+		--size)		size=${2:?}; shift ;;
+		--host)		host=${2:?}; shift ;;
+		--no-auth)	auth=0 ;;
+		*)		die "add-subsys: unknown argument $1" ;;
+		esac
+		shift
+	done
+
+	[[ ! -d "${NVMET}/subsystems/${nqn}" ]] || die "${nqn} exists"
+	if [[ -z "${port}" ]]; then
+		port=1
+		while [[ -d "${NVMET}/ports/${port}" ]]; do
+			port=$((port + 1))
+		done
+	fi
+	if [[ -z "${trsvcid}" ]]; then
+		trsvcid=4421
+		while trsvcid_used "${trsvcid}"; do
+			trsvcid=$((trsvcid + 1))
+		done
+	elif trsvcid_used "${trsvcid}"; then
+		die "trsvcid ${trsvcid} is in use"
+	fi
+	if [[ -z "${dev}" ]]; then
+		dev="${IMG_DIR}/${nqn}.img"
+		run mkdir -p "${IMG_DIR}"
+		run truncate -s "${size}" "${dev}"
+	fi
+
+	run modprobe nvmet-tcp
+	new_subsys "${nqn}" "${dev}"
+	enable_ns "${nqn}"
+	if [[ -n "${host}" && "${auth}" -eq 1 &&
+	      -d "${NVMET}/hosts/${host}" ]]; then
+		# The keys belong to the host, not to the subsystem.
+		echo "host ${host} exists, it keeps its DH-CHAP keys" >&2
+		allow_host "${nqn}" "${host}"
+	elif [[ -n "${host}" && "${auth}" -eq 1 ]]; then
+		hkey=$(nvme gen-dhchap-key -m 1 2>/dev/null | tail -1)
+		ckey=$(nvme gen-dhchap-key -m 1 2>/dev/null | tail -1)
+		[[ "${hkey}" == DHHC-1:* && "${ckey}" == DHHC-1:* ]] ||
+			die "nvme gen-dhchap-key failed"
+		allow_host "${nqn}" "${host}" "${hkey}" "${ckey}"
+		[[ "${DRY_RUN}" -eq 1 ]] || {
+			echo "host_key=${hkey}"
+			echo "ctrl_key=${ckey}"
+		}
+	elif [[ -n "${host}" ]]; then
+		allow_host "${nqn}" "${host}"
+	fi
+	new_port "${port}" "${trsvcid}"
+	link "${NVMET}/subsystems/${nqn}" \
+		"${NVMET}/ports/${port}/subsystems/${nqn}"
+	echo "port=${port} trsvcid=${trsvcid}"
+}
+
+cmd_del_subsys()
+{
+	local nqn=${1:?del-subsys needs an NQN}
+
+	[[ -d "${NVMET}/subsystems/${nqn}" ]] || die "no subsystem ${nqn}"
+	remove_subsys "${nqn}"
+	remove_empty_ports
+}
+
+# configfs attributes always have a size, so check the content.
+key_state()
+{
+	[[ -n "$(cat "$1" 2>/dev/null)" ]] && echo set || echo unset
+}
+
+cmd_status()
+{
+	local p s h ns
+
+	[[ -d "${NVMET}" ]] || { echo "nvmet not loaded"; return 0; }
+	if [[ -z "$(ls "${NVMET}/ports" "${NVMET}/subsystems" \
+		     "${NVMET}/hosts" 2>/dev/null | grep -v ':$' | xargs)" ]]; then
+		echo "no target configured"
+		return 0
+	fi
+	for p in "${NVMET}"/ports/*/; do
+		[[ -d "${p}" ]] || continue
+		echo "port $(basename "${p}"): $(cat "${p}addr_trtype")" \
+		     "$(cat "${p}addr_traddr"):$(cat "${p}addr_trsvcid")" \
+		     "tsas=$(cat "${p}addr_tsas")" \
+		     "-> $(ls "${p}subsystems" | xargs)"
+	done
+	for s in "${NVMET}"/subsystems/*/; do
+		[[ -d "${s}" ]] || continue
+		echo "subsystem $(basename "${s}"):" \
+		     "allow_any_host=$(cat "${s}attr_allow_any_host")" \
+		     "hosts: $(ls "${s}allowed_hosts" | xargs)"
+		for ns in "${s}"namespaces/*/; do
+			[[ -d "${ns}" ]] || continue
+			echo "  namespace $(basename "${ns}"):" \
+			     "$(cat "${ns}device_path") enable=$(cat "${ns}enable")"
+		done
+	done
+	for h in "${NVMET}"/hosts/*/; do
+		[[ -d "${h}" ]] || continue
+		echo "host $(basename "${h}"):" \
+		     "dhchap_key $(key_state "${h}dhchap_key")," \
+		     "dhchap_ctrl_key $(key_state "${h}dhchap_ctrl_key")," \
+		     "hash=$(cat "${h}dhchap_hash")" \
+		     "dhgroup=$(cat "${h}dhchap_dhgroup")"
+	done
+}
+
+ARGS=()
+for arg in "$@"; do
+	case "${arg}" in
+	-n|--dry-run)	DRY_RUN=1 ;;
+	-h|--help)	usage; exit 0 ;;
+	*)		ARGS+=("${arg}") ;;
+	esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
+CMD=${1:-}
+[[ -n "${CMD}" ]] || { usage >&2; exit 1; }
+shift
+
+if [[ "${CMD}" != status && "${DRY_RUN}" -eq 0 && "${EUID}" -ne 0 ]]; then
+	die "must run as root"
+fi
+
+case "${CMD}" in
+up)		cmd_up "$@" ;;
+down)		cmd_down ;;
+add-subsys)	cmd_add_subsys "$@" ;;
+del-subsys)	cmd_del_subsys "$@" ;;
+status)		cmd_status ;;
+*)		die "unknown command ${CMD}, see --help" ;;
+esac

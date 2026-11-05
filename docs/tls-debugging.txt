@@ -1,0 +1,75 @@
+# normal setup:
+
+./nvmet-setup --tls
+
+# debugging
+
+CONFIG_NVME_TCP_TLS
+CONFIG_NVME_TARGET_TCP_TLS
+
+AppArmor/SELinux and tlshd
+key permissions
+session keyring lookup!
+
+
+# debugging
+echo -n 'file drivers/nvme/target/* +p' > /sys/kernel/debug/dynamic_debug/control
+echo -n 'file drivers/nvme/host/* +p' > /sys/kernel/debug/dynamic_debug/control
+echo -n 'file drivers/nvme/common/* +p' > /sys/kernel/debug/dynamic_debug/control
+
+root@nvmet:~# journalctl -u tlshd.service -f
+
+Oct 04 14:08:31 nvmet tlshd[919]: failed to search key
+Oct 04 14:08:31 nvmet tlshd[919]: gnutls: Error in password/key file. (-31)
+Oct 04 14:08:31 nvmet tlshd[919]: Handshake with 'nvmet.lan' (192.168.154.148) failed
+Oct 04 14:08:31 nvmet tlshd[920]: gnutls: The TLS connection was non-properly terminated. (-110)
+Oct 04 14:08:31 nvmet tlshd[920]: Handshake with 'nvmet.lan' (192.168.154.148) failed
+
+
+
+~/nvmetcli/nvmetcli restore ~/nqn.io.json
+
+./nvme discover -t tcp -a 192.168.154.148 -s 4420 -q nqn.2014-08.org.nvmexpress:uuid:9a5e27b3-db9e-434b-91e8-772fef2baa72--tls -vv
+kernel supports: instance cntlid transport traddr trsvcid nqn queue_size nr_io_queues reconnect_delay ctrl_loss_tmo keep_alive_tmo hostnqn host_traddr host_iface hostid duplicate_connect disable_sqflow hdr_digest data_digest nr_write_queues nr_poll_queues tos keyring tls_key fast_io_fail_tmo discovery dhchap_secret dhchap_ctrl_secret tls
+option "concat" ignored
+connect ctrl, 'nqn=nqn.2014-08.org.nvmexpress.discovery,transport=tcp,traddr=192.168.154.148,trsvcid=4420,hostnqn=nqn.2014-08.org.nvmexpress:uuid:9a5e27b3-db9e-434b-91e8-772fef2baa72,hostid=9a5e27b3-db9e-434b-91e8-772fef2baa72,ctrl_loss_tmo=600,tls'
+Failed to write to /dev/nvme-fabrics: Required key not available
+failed to add controller, error failed to write to nvme-fabrics device
+
+
+
+# if key is missing (e.g. 'nvme gen-tls-key' was not executed)
+nvme-cli reports:
+Failed to write to /dev/nvme-fabrics: Required key not available
+
+
+# if no key has been found
+[  743.777583] [    T815] nvme nvme0: no valid PSK found
+
+# without tls
+[ 2104.314309] [     T57] nvmet: ctrl 1 start keep-alive timer for 120 secs
+[ 2104.317839] [     T57] nvmet: creating discovery controller 1 for subsystem nqn.2014-08.org.nvmexpress.discovery for NQN nqn.2014-08.org.nvmexpress:uuid:9a5e27b3-db9e-434b-91e8-772fef2baa72.
+[ 2104.327234] [   T1585] nvme nvme0: new ctrl: NQN "nqn.2014-08.org.nvmexpress.discovery", addr 192.168.154.148:4420, hostnqn: nqn.2014-08.org.nvmexpress:uuid:9a5e27b3-db9e-434b-91e8-772fef2baa72
+[ 2104.339805] [   T1585] nvme nvme0: Removing ctrl: NQN "nqn.2014-08.org.nvmexpress.discovery"
+[ 2104.369119] [   T1521] nvmet: ctrl 1 stop keep-alive
+
+
+
+
+
+
+
+nvme gen-tls-key -m 1 -I 1 -c nqn.io-1
+
+./nvme check-tls-key -i -I 1 -c nqn.io-1 -d NVMeTLSkey-1:01:<psk>: 
+./nvme connect -t tcp -a 192.168.154.148 -s 4420 -q nqn.2014-08.org.nvmexpress:uuid:9a5e27b3-db9e-434b-91e8-772fef2baa72 -n nqn.io-1 --tls -vv
+
+# keyctl show
+Session Keyring
+1010743870 --alswrv      0     0  keyring: _ses
+1047446784 --alswrv      0 65534   \_ keyring: _uid.0
+ 520781640 ---lswrv      0     0   \_ keyring: .nvme
+ 403883130 --als-rv      0     0       \_ psk: NVMe1R01 nqn.2014-08.org.nvmexpress:uuid:9a5e27b3-db9e-434b-91e8-772fef2baa72 nqn.io-1 WiF8zl0Ql84IMwKUE71CZq9oE426zPMfgTSZznpYHP4=a
+
+
+

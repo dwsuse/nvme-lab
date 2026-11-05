@@ -1,0 +1,11 @@
+# nvmet (NVMe-oF target), Debian 13. From the old VM (2026-11-05).
+# Kernel: debian-fastforward (ffwd13, 6.19 on the old VM): debian-fastforward
+# debian-fastforward-pgp-keys, then linux-image-cloud-amd64 from it.
+
+# build (nvme-cli, ktls-utils, nvmetcli)
+gcc make autoconf automake libtool meson ninja-build pkg-config git tig
+libjson-c-dev libssl-dev libkeyutils-dev libsystemd-dev libarchive-dev libglib2.0-dev libgnutls28-dev libnl-genl-3-dev libkmod-dev libudev-dev
+# target
+targetcli-fb python3-configshell-fb python3-venv python3-pip python3-setuptools python3-six
+# debugging
+gdb linux-perf strace tcpdump iperf bmon btop htop tree socat zstd uuid-runtime nfs-common
