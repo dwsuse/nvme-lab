@@ -10,6 +10,7 @@ Throwaway test scripts don't belong here, tools that are used again do.
 | `setup/debian.sh nvme\|nvmet` | packages, newest Debian kernel, nvme-cli and its source-built dependencies, role setup |
 | `setup/kernel.sh` | newest Debian kernel, or a development kernel built from a tree |
 | `setup/build.sh` | clone/update and build nvme-cli, ktls-utils + mdadm (versions from nvme-cli's `scripts/ci-deps.sh`), nvmf-failover, blktests |
+| `setup/freebsd.sh` | FreeBSD VM (`nvme-bsd`): packages and nvme-cli's FreeBSD build and tests, as its CI |
 | `setup/packages-*.txt` | packages per VM |
 | `bin/nvmet-target` | target in configfs: `up [--tls] [--no-auth]`, `add-subsys`, `status`, `down` |
 | `bin/nuke-kernel` | remove development kernels that aren't packages |
@@ -29,6 +30,14 @@ systemctl reboot                          # into the new kernel
 
 `nvmet` needs a second disk for the default namespace (`/dev/vdb`,
 `DEV=` in `nvmet-target`).
+
+FreeBSD (`nvme-bsd`, official `BASIC-CLOUDINIT` image), as root:
+
+```
+pkg install -y git
+git clone https://github.com/igaw/nvme-lab /root/nvme-lab
+/root/nvme-lab/setup/freebsd.sh
+```
 
 ## Secrets
 

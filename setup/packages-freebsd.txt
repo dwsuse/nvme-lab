@@ -1,5 +1,5 @@
 # freebsd (FreeBSD 15.1, nvme-cli FreeBSD port). pkg install -y ...
 # Same as nvme-cli's .github/workflows/build-freebsd.yml, plus tools.
-bash git meson ninja pkgconf json-c openssl python3 dbus tig vim
+bash git meson ninja pkgconf json-c openssl python3 dbus tig vim qemu-guest-agent
 # The old VM also had the pkgbase sets (FreeBSD-set-base, -dbg, -kernels,
 # -lib32, -tests), i.e. it was installed with pkgbase.
