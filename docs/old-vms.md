@@ -1,4 +1,4 @@
-# Inventory of the old VMs (2026-11-05)
+# The old VMs (inventory of 2026-11-05)
 
 Taken before the move to beryllium. All three ran on neon in main.
 

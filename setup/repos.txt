@@ -1,5 +1,5 @@
 # Upstream trees, cloned and built by setup/build.sh into /root/work.
-# Local work of the old VMs: backup bundles (docs/inventory.md, "Backup").
+# Local work of the old VMs: backup bundles (docs/old-vms.md, "Backup").
 nvme-cli       https://github.com/linux-nvme/nvme-cli.git       master   nvme, nvmet
 ktls-utils     https://github.com/oracle/ktls-utils.git         tag from nvme-cli scripts/ci-deps.sh   nvme, nvmet (tlshd)
 mdadm          https://git.kernel.org/pub/scm/utils/mdadm/mdadm.git   tag from ci-deps.sh   nvme, nvmet

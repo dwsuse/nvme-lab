@@ -1,22 +1,42 @@
 # nvme-lab
 
 Test VMs for nvme-cli and the kernel's NVMe-oF code: `nvme` (host),
-`nvmet` (target), `freebsd` (nvme-cli's FreeBSD port). The VMs are
-disposable; this repo makes a fresh one ready for NVMe/TCP tests.
-Throwaway test scripts don't belong here, tools that are used again do.
+`nvmet` (target), `nvme-bsd` (nvme-cli's FreeBSD port). The VMs are
+disposable; this repo makes a fresh one ready for NVMe/TCP tests, and
+`bin/lab` drives them from the workstation. Throwaway test scripts
+don't belong here, tools that are used again do.
+
+## Using the lab
+
+```
+ln -s ~/nvme-lab/bin/lab ~/bin/lab
+echo 'ssh_key = "~/.ssh/nvme-cli-test"' > ~/.config/nvme-lab/config.toml
+lab hosts                                  # the VMs of lab.toml
+lab inventory                              # what's on them (read only)
+lab sync nvme -n pr-1234                   # this git tree -> /root/scratch/pr-1234
+lab ci debian pr-1234 -- scripts/build.sh  # in an nvme-cli CI image
+lab ssh nvme-bsd                           # log in
+```
+
+[docs/testing.md](docs/testing.md) is the guide: workstation setup,
+the rules for using the VMs, and the usual runs (a branch on the host,
+CI parity, FreeBSD, NVMe/TCP between `nvme` and `nvmet`).
 
 | Path | What |
 |---|---|
+| `bin/lab`, `nvmelab/` | the workstation tool (Python >= 3.11, standard library only); `nvmelab/probe.sh` is the inventory probe it pipes to a VM |
+| `lab.toml` | the VMs: name, address, what they are for |
 | `setup/debian.sh nvme\|nvmet` | packages, newest Debian kernel, nvme-cli and its source-built dependencies, role setup |
 | `setup/kernel.sh` | newest Debian kernel, or a development kernel built from a tree |
 | `setup/build.sh` | clone/update and build nvme-cli, ktls-utils + mdadm (versions from nvme-cli's `scripts/ci-deps.sh`), nvmf-failover, blktests |
 | `setup/freebsd.sh` | FreeBSD VM (`nvme-bsd`): packages and nvme-cli's FreeBSD build and tests, as its CI |
 | `setup/packages-*.txt` | packages per VM |
-| `bin/nvmet-target` | target in configfs: `up [--tls] [--no-auth]`, `add-subsys`, `status`, `down` |
+| `bin/nvmet-target` | target in configfs: `up [--tls] [--no-auth]`, `add-subsys`, `del-subsys`, `status`, `down` |
 | `bin/nuke-kernel` | remove development kernels that aren't packages |
 | `common/` | the host identity (hostnqn, hostid) `nvmet-target` allows by default |
 | `config/tlshd.conf` | tlshd with debug logging, for TLS debugging |
-| `docs/` | TLS/tlshd debugging notes, inventory of the old VMs |
+| `docs/` | the testing guide, the inventory of the VMs, TLS/tlshd debugging notes, the old VMs and their backup |
+| `tests/`, `Makefile` | `make check`: unit tests, shell syntax, shellcheck (CI runs it) |
 
 ## A new VM
 
