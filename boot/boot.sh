@@ -45,7 +45,9 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-[ -n "$NAME" ] && [ -n "$TARGET" ] && [ -n "$UUID" ] || usage
+if [ -z "$NAME" ] || [ -z "$TARGET" ] || [ -z "$UUID" ]; then
+    usage
+fi
 TRADDR=${TARGET%:*} TRSVCID=${TARGET##*:}
 
 OUT=/scratch/lab-boot/out/$NAME

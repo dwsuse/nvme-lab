@@ -18,7 +18,10 @@ nvme connect -t tcp -a "$TRADDR" -s "$TRSVCID" -n "$NQN" 2>&1 \
 sleep 2
 CTRL=$(nvme list-subsys -o json \
     | jq -r ".[].Subsystems[] | select(.NQN==\"$NQN\") | .Paths[0].Name")
-[ -n "$CTRL" ] && [ "$CTRL" != null ] || { echo "not connected" >&2; exit 1; }
+if [ -z "$CTRL" ] || [ "$CTRL" = null ]; then
+    echo "not connected" >&2
+    exit 1
+fi
 for NS in "/sys/class/nvme/$CTRL/"nvme*n1; do NS=${NS##*/}; break; done
 # With native multipath the block device is nvmeXnY, not nvmeXcZnY.
 BLK=$(echo "$NS" | sed 's/c[0-9]*n/n/')
