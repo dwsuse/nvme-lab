@@ -37,6 +37,7 @@ CI parity, FreeBSD, NVMe/TCP between `nvme` and `nvmet`).
 | `config/tlshd.conf` | tlshd with debug logging, for TLS debugging |
 | `docs/` | the testing guide, the inventory of the VMs, TLS/tlshd debugging notes, the old VMs and their backup |
 | `tests/`, `Makefile` | `make check`: unit tests, shell syntax, shellcheck (CI runs it) |
+| `.claude/skills/nvme-lab` | Claude Code skill for the lab; `ln -s ~/nvme-lab/.claude/skills/nvme-lab ~/.claude/skills/` makes it available in every project |
 
 ## A new VM
 
