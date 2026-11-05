@@ -28,6 +28,7 @@ esac
 here=$(cd "$(dirname "$0")/.." && pwd)
 export DEBIAN_FRONTEND=noninteractive
 
+# shellcheck source=/dev/null
 . /etc/os-release
 [[ "${VERSION_CODENAME}" == trixie ]] ||
     { echo "$0: needs Debian 13 (trixie), this is ${PRETTY_NAME}" >&2; exit 1; }
@@ -82,9 +83,11 @@ nvmet)
     printf '%s\n' nvmet nvmet-tcp > /etc/modules-load.d/nvme-lab.conf
     ;;
 esac
+# shellcheck disable=SC2046 # one module per word
 modprobe -a $(cat /etc/modules-load.d/nvme-lab.conf) || true
 
 step "done"
+# shellcheck disable=SC2012 # kernel versions, no blanks
 echo "Kernel installed: $(ls /boot/vmlinuz-* | sed 's#/boot/vmlinuz-##' | tr '\n' ' ')"
 echo "Running: $(uname -r). Reboot into the new kernel: systemctl reboot"
 [[ "${role}" == nvmet ]] && echo "Then: KEYS_FILE (HOST_KEY=, CTRL_KEY=) and 'nvmet-target up' (see README)"

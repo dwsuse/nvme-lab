@@ -56,6 +56,7 @@ dev_kernel() {
     make -j"${jobs}" bindeb-pkg
     # bindeb-pkg leaves the packages next to the tree
     local deb
+    # shellcheck disable=SC2010 # newest first needs ls -t
     deb=$(ls -t ../linux-image-*-nvmelab_*.deb | grep -v dbg | head -1)
     dpkg -i "${deb}"
     echo "installed ${deb}; reboot to use it, trixie's kernel stays in grub"

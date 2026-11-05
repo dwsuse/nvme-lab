@@ -43,7 +43,7 @@ for i in "${!manual_kernels[@]}"; do
     echo "[$i] ${manual_kernels[$i]}"
 done
 
-read -p "Enter the number of the kernel to remove: " index
+read -r -p "Enter the number of the kernel to remove: " index
 
 if ! [[ "$index" =~ ^[0-9]+$ ]] || [ "$index" -ge "${#manual_kernels[@]}" ]; then
     echo "Invalid selection."

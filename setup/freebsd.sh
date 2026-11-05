@@ -16,6 +16,7 @@ src=/root/work
 
 echo "==> packages"
 pkgs=$(sed 's/#.*//' "${here}/setup/packages-freebsd.txt" | xargs)
+# shellcheck disable=SC2086 # one package per word
 env ASSUME_ALWAYS_YES=yes pkg install -y ${pkgs}
 
 echo "==> nvme-cli"

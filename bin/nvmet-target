@@ -338,13 +338,23 @@ key_state()
 	[[ -n "$(cat "$1" 2>/dev/null)" ]] && echo set || echo unset
 }
 
+# names DIR: the entries of DIR on one line (configfs names have no blanks)
+names()
+{
+	local e out=()
+
+	for e in "$1"/*; do
+		[[ -e "${e}" ]] && out+=("${e##*/}")
+	done
+	echo "${out[*]}"
+}
+
 cmd_status()
 {
 	local p s h ns
 
 	[[ -d "${NVMET}" ]] || { echo "nvmet not loaded"; return 0; }
-	if [[ -z "$(ls "${NVMET}/ports" "${NVMET}/subsystems" \
-		     "${NVMET}/hosts" 2>/dev/null | grep -v ':$' | xargs)" ]]; then
+	if [[ -z "$(names "${NVMET}/ports")$(names "${NVMET}/subsystems")$(names "${NVMET}/hosts")" ]]; then
 		echo "no target configured"
 		return 0
 	fi
@@ -353,13 +363,13 @@ cmd_status()
 		echo "port $(basename "${p}"): $(cat "${p}addr_trtype")" \
 		     "$(cat "${p}addr_traddr"):$(cat "${p}addr_trsvcid")" \
 		     "tsas=$(cat "${p}addr_tsas")" \
-		     "-> $(ls "${p}subsystems" | xargs)"
+		     "-> $(names "${p}subsystems")"
 	done
 	for s in "${NVMET}"/subsystems/*/; do
 		[[ -d "${s}" ]] || continue
 		echo "subsystem $(basename "${s}"):" \
 		     "allow_any_host=$(cat "${s}attr_allow_any_host")" \
-		     "hosts: $(ls "${s}allowed_hosts" | xargs)"
+		     "hosts: $(names "${s}allowed_hosts")"
 		for ns in "${s}"namespaces/*/; do
 			[[ -d "${ns}" ]] || continue
 			echo "  namespace $(basename "${ns}"):" \
