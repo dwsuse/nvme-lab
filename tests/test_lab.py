@@ -12,7 +12,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from nvmelab import ci, cli, config, inventory, remote, sync  # noqa: E402
+from nvmelab import boot, ci, cli, config, inventory, remote, sync  # noqa: E402,E501
 from nvmelab.config import ConfigError  # noqa: E402
 
 LAB = """
@@ -210,6 +210,70 @@ class SyncTest(unittest.TestCase):
             self.assertEqual(delete, b'gone\0')
 
 
+class BootTest(unittest.TestCase):
+    TARGET = ('192.0.2.30', '4421')
+
+    def test_parse_trsvcid(self):
+        self.assertEqual(boot.parse_trsvcid('port=1 trsvcid=4421\n'), '4421')
+        with self.assertRaisesRegex(ConfigError, 'no trsvcid'):
+            boot.parse_trsvcid('error: no such host\n')
+
+    def test_parse_target(self):
+        self.assertEqual(boot.parse_target('TRADDR=192.0.2.30\n'
+                                           'TRSVCID=4421\n'), self.TARGET)
+        with self.assertRaisesRegex(ConfigError, 'lab boot setup'):
+            boot.parse_target('')
+
+    def test_run_argv(self):
+        argv = boot.run_argv('c1', self.TARGET, tree='wt-1',
+                             module='/scratch/lab-boot/modules/c1',
+                             source='static', hostonly=True,
+                             append='rd.debug', timeout=60)
+        self.assertEqual(argv[:4], ['docker', 'exec', 'lab-boot', 'sh'])
+        self.assertEqual(argv[4], '/scratch/lab-boot/scripts/boot.sh')
+        opts = argv[5:]
+        self.assertEqual(opts[opts.index('--target') + 1],
+                         '192.0.2.30:4421')
+        self.assertEqual(opts[opts.index('--nvme-tree') + 1], '/scratch/wt-1')
+        self.assertEqual(opts[opts.index('--source') + 1], 'static')
+        self.assertEqual(opts[opts.index('--root-uuid') + 1], boot.ROOT_UUID)
+        self.assertIn('--hostonly', opts)
+        self.assertEqual(opts[opts.index('--append') + 1], 'rd.debug')
+        self.assertEqual(opts[opts.index('--timeout') + 1], '60')
+
+    def test_run_argv_defaults(self):
+        opts = boot.run_argv('c1', self.TARGET)[5:]
+        self.assertEqual(opts[opts.index('--source') + 1], 'cmdline')
+        for flag in ('--nvme-tree', '--nvme-package', '--dracut-module',
+                     '--hostonly', '--append', '--timeout'):
+            self.assertNotIn(flag, opts)
+
+    def test_run_argv_checks(self):
+        for kwargs, msg in ((dict(source='static'), 'needs --hostonly'),
+                            (dict(source='legacy'), 'needs --hostonly'),
+                            (dict(source='bogus'), "bad --source"),
+                            (dict(tree='t', package=True), 'exclude')):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(ConfigError, msg):
+                    boot.run_argv('c1', self.TARGET, **kwargs)
+        with self.assertRaisesRegex(ConfigError, 'bad scratch name'):
+            boot.run_argv('../c1', self.TARGET)
+        with self.assertRaisesRegex(ConfigError, 'bad scratch name'):
+            boot.run_argv('c1', self.TARGET, tree='../t')
+
+    def test_upload_argv(self):
+        cfg = config.Config(hosts={}, ssh_key=None)
+        host = config.Host('a', 'a.lan')
+        argv = boot.upload_argv(cfg, host, '/root/scratch/lab-boot/x y')
+        self.assertEqual(argv[-1], "rm -rf '/root/scratch/lab-boot/x y' && "
+                         "mkdir -p '/root/scratch/lab-boot/x y' && "
+                         "tar -C '/root/scratch/lab-boot/x y' -xf -")
+
+    def test_scripts_exist(self):
+        for script in ('container.sh', 'mkroot.sh', 'boot.sh'):
+            self.assertTrue((boot.SCRIPTS / script).is_file(), script)
+
+
 class CliTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -239,6 +303,24 @@ class CliTest(unittest.TestCase):
         docker = shlex.split(argv[-1])
         self.assertEqual(docker[-1], 'git config --global --add '
                          'safe.directory /src && make --help')
+
+    def test_boot_run_dry_run(self):
+        rc, out, _ = self.run_cli('boot', 'run', 'c1', '--nvme', 'wt',
+                                  '--dracut-module', '/tmp/m', '--source',
+                                  'legacy', '--hostonly', '--dry-run')
+        self.assertEqual(rc, 0)
+        argv = shlex.split(out)
+        self.assertEqual(argv[argv.index('--') - 1], 'root@a.lan')
+        inner = shlex.split(argv[-1])
+        self.assertEqual(inner[inner.index('--dracut-module') + 1],
+                         '/scratch/lab-boot/modules/c1')
+        self.assertEqual(inner[inner.index('--nvme-tree') + 1], '/scratch/wt')
+
+    def test_boot_run_static_needs_hostonly(self):
+        rc, _, err = self.run_cli('boot', 'run', 'c1', '--source', 'static',
+                                  '--dry-run')
+        self.assertEqual(rc, 2)
+        self.assertIn('needs --hostonly', err)
 
     def test_ci_needs_command(self):
         rc, _, err = self.run_cli('ci', 'debian', 't', '--dry-run')

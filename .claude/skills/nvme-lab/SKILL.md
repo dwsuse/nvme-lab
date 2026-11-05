@@ -18,6 +18,7 @@ $L sync HOST [-C TREE] [-n NAME] [-w]      # git tree -> /root/scratch/NAME
 $L ci IMAGE NAME [--pull] -- COMMAND       # CI image on nvme, tree NAME
 $L ssh HOST [COMMAND...]                   # remote shell runs the words
 $L scratch HOST [--rm NAME...]             # list / remove scratch trees
+$L boot setup | run NAME [...] | teardown  # boot QEMU from an NVMe/TCP root
 ```
 
 - `sync` pushes HEAD (or `-r REF`) with git and checks it out detached:
@@ -28,6 +29,11 @@ $L scratch HOST [--rm NAME...]             # list / remove scratch trees
   CI parity for an nvme-cli PR before pushing:
   `lab ci debian N -- scripts/build.sh -b release -c gcc`, same with
   `tumbleweed`, and `lab ci debian N -- scripts/build.sh -m muon`.
+  nvme-cli's main CI matrix runs `build.sh -b B -c C -x` (valgrind):
+  run that too, as `lab ci debian N -- 'ulimit -n 4096 && scripts/build.sh
+  -b release -c clang -x'` (valgrind refuses docker's huge fd limit).
+  Parallel jobs need one synced tree each (`-n N-deb`, `-n N-tw`):
+  `build.sh` owns `.build-ci` in the tree.
   `--pull` first if the image may be old. Default Docker network on
   nvme has no DNS: for apt/pip use `docker run --network host` via ssh.
 - nvme has docker, not podman. Screenshots of a static HTML page (no
@@ -40,6 +46,11 @@ $L scratch HOST [--rm NAME...]             # list / remove scratch trees
   has no playwright Python package and no PyPI access.
 - FreeBSD: `lab sync nvme-bsd -n N`, then `meson setup .build && ninja
   -C .build && meson test -C .build` in `/root/scratch/N`.
+- dracut / boot from NVMe/TCP: `lab boot setup` once, then `lab boot run
+  NAME [--nvme TREE] [--dracut-module DIR] [--source
+  cmdline|static|legacy|none] [--hostonly]` per case (RESULT=PASS/FAIL,
+  results in /root/scratch/lab-boot/out/NAME), `lab boot teardown` at
+  the end. No NBFT (no firmware for it). Details: docs/testing.md.
 - NVMe/TCP: `nvmet-target add-subsys NQN --no-auth --host HOSTNQN` on
   nvmet (prints the port, from 4421), `nvme connect -t tcp -a nvmet -s
   PORT -n NQN` on nvme, then `disconnect` and `del-subsys`.

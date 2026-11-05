@@ -106,6 +106,54 @@ lab ssh nvmet nvmet-target del-subsys nqn.pr-4376
 DH-CHAP and TLS: README, "Secrets". blktests (`/root/work/blktests`)
 and nvmf-failover (`nvmf-failover`) are installed on `nvme`.
 
+### Booting from NVMe/TCP (dracut)
+
+`lab boot` boots a QEMU guest whose root file system is on an
+NVMe/TCP namespace of `nvmet`, through an initrd built by dracut: the
+whole pre-OS path of nvme-cli (dracut's nvmf module, `nvme connect-all`,
+the host identity) on a real kernel, with no hardware.
+
+```
+lab boot setup                      # once: container, subsystem, root
+lab sync nvme -n pr-4384            # an nvme-cli tree to test
+lab boot run v2-legacy --nvme v211 --source legacy --hostonly
+lab boot run v3-static --nvme pr-4384 --source static --hostonly \
+    --dracut-module ~/dracut/modules.d/74nvmf
+lab boot run v3-cmdline --nvme pr-4384 --hostonly \
+    --dracut-module ~/dracut/modules.d/74nvmf
+lab boot teardown                   # removes it all
+```
+
+`setup` creates the container `lab-boot` on `nvme` (openSUSE
+Tumbleweed with dracut, a kernel and QEMU; `nvme`'s `/dev/kvm`), a
+subsystem on `nvmet` that lets in only the guest's host NQN, and a root
+file system on its namespace whose `/init` reports success and powers
+the guest off. Each `run` installs the nvme-cli tree (built in
+`TREE/.lab-boot` with `--sysconfdir=/etc`), puts dracut's nvmf module in
+place (the package's, or `--dracut-module DIR`), builds the initrd and
+boots it; it prints `RESULT=PASS` or `RESULT=FAIL` and leaves the
+initrd, `lsinitrd`, dracut's log and the console in
+`/root/scratch/lab-boot/out/NAME`.
+
+`--source` is where the initrd learns the target from: `cmdline`
+(`rd.nvmf.discover=`, the default), `static` (`nvme-fabrics.conf`,
+nvme-cli 3), `legacy` (`discovery.conf`, nvme-cli 2) or `none`
+(`--append` gives it). `static` and `legacy` need `--hostonly`: only a
+hostonly initrd carries the host's `/etc/nvme`. Without it, the host
+identity goes on the kernel command line (`rd.nvmf.hostnqn=`). dracut's
+nvmf module up to at least dracut 112 can't write that (no `/etc/nvme`
+in a non-hostonly initrd), and only reads `nvme-fabrics.conf` with the
+patches of dracut's `nvmf-nvme-cli-3` branch, hence the module overlay
+in the examples. With nvme-cli 3 up to 3.2, the stock module's
+`rd.nvmf.discover=` fails too: it writes `--host-traddr=none` to
+`discovery.conf`, and the `nvme-fabrics.conf` that nvme-cli converts it
+to doesn't parse.
+
+What it can't do: an NBFT boot (QEMU's firmware has no NBFT), and the
+OS after switch-root (the root is busybox). The initrd uses systemd and
+`systemd-networkd` with a static `ip=`: Tumbleweed has no `dhclient`
+for dracut's `network-legacy`.
+
 ### A quick look
 
 ```

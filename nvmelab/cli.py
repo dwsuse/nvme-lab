@@ -13,7 +13,7 @@ import shlex
 import subprocess
 import sys
 
-from . import ci, config, inventory, remote, sync
+from . import boot, ci, config, inventory, remote, sync
 from .config import SCRATCH, ConfigError
 
 
@@ -75,6 +75,40 @@ def cmd_scratch(cfg, args):
                       'du -sh -- * 2>/dev/null || true').returncode
 
 
+def boot_hosts(cfg, args):
+    host = cfg.host(args.host) if args.host else cfg.ci_host()
+    return host, cfg.host(args.target)
+
+
+def cmd_boot_setup(cfg, args):
+    host, target = boot_hosts(cfg, args)
+    boot.setup(cfg, host, target, recreate=args.recreate)
+    return 0
+
+
+def cmd_boot_run(cfg, args):
+    host = cfg.host(args.host) if args.host else cfg.ci_host()
+    options = dict(tree=args.nvme, package=args.nvme_package,
+                   source=args.source, hostonly=args.hostonly,
+                   append=' '.join(args.append) or None,
+                   timeout=args.timeout)
+    if args.dry_run:
+        argv = boot.run_argv(args.name, ('TRADDR', 'TRSVCID'),
+                             module=args.dracut_module and
+                             f'{boot.CONTAINER_DIR}/modules/{args.name}',
+                             **options)
+        print(shlex.join(remote.ssh_argv(cfg, host, argv)))
+        return 0
+    return boot.run(cfg, host, args.name, module=args.dracut_module,
+                    **options)
+
+
+def cmd_boot_teardown(cfg, args):
+    host, target = boot_hosts(cfg, args)
+    boot.teardown(cfg, host, target)
+    return 0
+
+
 def parser():
     p = argparse.ArgumentParser(
         prog='lab', description=__doc__,
@@ -133,6 +167,50 @@ def parser():
     s.add_argument('--dry-run', action='store_true',
                    help='print the ssh command, run nothing')
     s.set_defaults(fn=cmd_ci)
+
+    s = sub.add_parser('boot', help='boot a QEMU guest from an NVMe/TCP '
+                       'root, with dracut',
+                       description=boot.__doc__,
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    bsub = s.add_subparsers(dest='boot_cmd', required=True,
+                            metavar='SUBCOMMAND')
+    b = bsub.add_parser('setup', help='create the container, the target '
+                        'subsystem and the root file system')
+    b.add_argument('--host', help='default: the host with ci = true')
+    b.add_argument('--target', default='nvmet',
+                   help='the NVMe/TCP target host (default: nvmet)')
+    b.add_argument('--recreate', action='store_true',
+                   help='create the container anew')
+    b.set_defaults(fn=cmd_boot_setup)
+    b = bsub.add_parser('run', help='build an initrd and boot it')
+    b.add_argument('name', help='the case, results in '
+                   f'{boot.BOOT_DIR}/out/NAME')
+    b.add_argument('--host', help='default: the host with ci = true')
+    nvme = b.add_mutually_exclusive_group()
+    nvme.add_argument('--nvme', metavar='TREE', help='build and install '
+                      f'the nvme-cli tree {SCRATCH}/TREE (lab sync)')
+    nvme.add_argument('--nvme-package', action='store_true',
+                      help="reinstall the distribution's nvme-cli")
+    b.add_argument('--dracut-module', metavar='DIR', help="a local "
+                   "directory to use as dracut's 74nvmf module")
+    b.add_argument('--source', default='cmdline', choices=boot.SOURCES,
+                   help='where the initrd learns the target: cmdline: '
+                   'rd.nvmf.discover=; static: nvme-fabrics.conf; legacy: '
+                   'discovery.conf; none: give it with --append')
+    b.add_argument('--hostonly', action='store_true',
+                   help='a hostonly initrd (needed by static and legacy)')
+    b.add_argument('--append', nargs='*', default=[], metavar='ARG',
+                   help='more kernel command line')
+    b.add_argument('--timeout', type=int, help='seconds for the boot '
+                   '(default: 240)')
+    b.add_argument('--dry-run', action='store_true',
+                   help='print the ssh command, run nothing')
+    b.set_defaults(fn=cmd_boot_run)
+    b = bsub.add_parser('teardown', help='remove the container, the '
+                        'subsystem and the results')
+    b.add_argument('--host', help='default: the host with ci = true')
+    b.add_argument('--target', default='nvmet')
+    b.set_defaults(fn=cmd_boot_teardown)
 
     s = sub.add_parser('scratch', help=f'list or remove the trees in '
                        f'{SCRATCH}')

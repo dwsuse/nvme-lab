@@ -2,7 +2,8 @@
 # shellcheck is skipped when it isn't installed; CI always has it.
 
 SHELL_SCRIPTS = bin/nvmet-target bin/nuke-kernel setup/build.sh \
-	setup/debian.sh setup/freebsd.sh setup/kernel.sh nvmelab/probe.sh
+	setup/debian.sh setup/freebsd.sh setup/kernel.sh nvmelab/probe.sh \
+	boot/container.sh boot/mkroot.sh boot/boot.sh
 PYTHON ?= python3
 
 .PHONY: check test lint
