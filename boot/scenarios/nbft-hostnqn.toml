@@ -4,6 +4,11 @@
 name = "NBFT boot, the system's host NQN differs from the NBFT's"
 tags = ["nbft", "hostnqn"]
 
+[xfail_on]
+"v3.0" = "connect-all --nbft connects as the system's host, since 026717040df7, fixed by a043a477b (nvme-cli#4384)"
+"v3.1" = "connect-all --nbft connects as the system's host, since 026717040df7, fixed by a043a477b (nvme-cli#4384)"
+"v3.2" = "connect-all --nbft connects as the system's host, since 026717040df7, fixed by a043a477b (nvme-cli#4384)"
+
 [boot]
 nbft = true
 host_identity = false

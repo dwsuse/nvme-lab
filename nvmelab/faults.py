@@ -69,6 +69,12 @@ def failover_argv(kind, traddr, trsvcid, action):
             f'{action}')
 
 
+def sync_failover(cfg, host):
+    """Put the nvmf-failover checkout of the configuration on HOST."""
+    sync.sync(cfg, host, cfg.nvmf_failover, FAILOVER_TREE, worktree=True,
+              log=lambda *a: None)
+
+
 def clear_network(cfg, host):
     """Remove the nftables table of nvmf-failover's TCP faults on HOST,
     e.g. after an interrupted run."""
@@ -82,13 +88,15 @@ class Faults:
     up again, in reverse order, also on errors. ON_CHANGE(env) is called
     when a path came back on another port."""
 
-    def __init__(self, cfg, host, env, specs, on_change=None):
+    def __init__(self, cfg, host, env, specs, on_change=None, synced=False,
+                 out=None):
         self.cfg, self.host, self.env = cfg, host, env
         self.specs = list(specs)
         self.on_change = on_change
+        self.out = out
         self.undo = []
         self._target = None
-        self._synced = False
+        self._synced = synced
 
     def target(self):
         if self._target is None:
@@ -99,8 +107,7 @@ class Faults:
 
     def failover(self, kind, trsvcid, action):
         if not self._synced:
-            sync.sync(self.cfg, self.host, self.cfg.nvmf_failover,
-                      FAILOVER_TREE, worktree=True, log=lambda *a: None)
+            sync_failover(self.cfg, self.host)
             self._synced = True
         remote.run(self.cfg, self.host,
                    failover_argv(kind, self.env.traddr, trsvcid, action),
@@ -111,7 +118,7 @@ class Faults:
         kind = f['kind']
         print(f"fault: {kind}{':' + f['state'] if f['state'] else ''} "
               f"on {f['path']} (port {port}, {self.env.traddr}:{trsvcid})",
-              flush=True)
+              file=self.out or sys.stdout, flush=True)
         if kind == 'port-removed':
             self.target().remove_port(port)
             self.undo.append(lambda: self.add_back(f['path'], port,
@@ -127,9 +134,7 @@ class Faults:
         """Export the path's subsystem on a new port again. The target
         gives it the lowest free port ID, so usually the old port and
         service ID."""
-        from .boot import EXTRA_NQN, ROOT_NQN
-        nqn = EXTRA_NQN if path == 'extra' else ROOT_NQN
-        port = self.target().add_port(nqn)
+        port = self.target().add_port(self.env.slot.nqn_of(path))
         trsvcid = self.target().trsvcid(port)
         if trsvcid != old_trsvcid:
             print(f'fault: {path} came back at {trsvcid}, was {old_trsvcid}',

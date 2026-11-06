@@ -20,8 +20,9 @@ $L parity NAME [-C TREE] [-r REF] [-w] [--only JOB...] [--pull]
                                            # CI parity: 4 jobs in parallel
 $L ssh HOST [COMMAND...]                   # remote shell runs the words
 $L scratch HOST [--rm NAME...]             # list / remove scratch trees
-$L boot setup | run NAME [...] | teardown  # boot QEMU from an NVMe/TCP root
-$L boot test [SCENARIO...] [--tag T] [--skip-tag T] [--nvme TREE]
+$L boot setup [--slots N] | run NAME [--slot N] [...] | teardown
+                                           # boot QEMU from an NVMe/TCP root
+$L boot test [SCENARIO...] [-j N] [--tag T] [--skip-tag T] [--nvme TREE]
              [--dracut-module DIR]         # boot scenarios with verdicts
 $L boot nbft FILE [--nbft-ssns ...]        # write the NBFT of a case
 ```
@@ -67,6 +68,11 @@ $L boot nbft FILE [--nbft-ssns ...]        # write the NBFT of a case
   results in /root/scratch/lab-boot/out/NAME, the report in state.txt).
   `lab boot teardown` at the end; it removes earlier results too, ask
   first. A new test case is a new scenario file, not a hand-made run.
+- Parallel boots: `lab boot setup --slots 8` (each slot its own
+  container, subsystems, root fs and host identity), then `lab boot test
+  -j 8`; 8 slots fit the CI host. Repeat `--nvme TREE` for a version
+  matrix in one run (version-specific scenarios only with their trees;
+  `xfail_on` for known bugs of a release).
 - Faults while the guest boots: `--fault KIND:PATH` on `lab boot run` or
   `[[fault]]` in a scenario: `port-removed` and `ana:STATE` on the target
   (nvme-target-control), `tcp-refuse` and `tcp-drop` on the CI host's
@@ -74,8 +80,8 @@ $L boot nbft FILE [--nbft-ssns ...]        # write the NBFT of a case
   the boot, also on failure.
 - nvme-cli versions for dracut changes: master and 3.2, plus 2.16, 2.13
   and 2.8 (what supported distributions ship; docs/testing.md, "nvme-cli
-  versions"). Sync tags with `lab sync nvme -r v2.16 -n v216`; on 2.x skip
-  the tags nvme-cli-3 and pre-os.
+  versions"). Sync tags with `lab sync nvme -C ~/nvme-cli -r v2.16 -n
+  v216`, then all trees in one `lab boot test -j 8 --nvme ... --nvme ...`.
 - NBFT boots: `lab boot run NAME --nbft` gives the guest an NBFT that lab
   generates (nvmelab/nbft.py; QEMU `-acpitable`): HFI = the guest NIC,
   SSNS = the root. More: `--nbft-ssns [TRADDR:]PORT/NQN[,FLAG...]` or

@@ -3,6 +3,11 @@
 name = "NBFT boot through a discovery descriptor"
 tags = ["nbft"]
 
+# nvme-cli acts on the NBFT's discovery descriptors since 2.10
+[xfail_on]
+"v2.8" = "connect-all --nbft ignores discovery descriptors before 2.10 (63d38aeac)"
+"v2.9" = "connect-all --nbft ignores discovery descriptors before 2.10 (63d38aeac)"
+
 [boot]
 nbft_no_root = true
 nbft_discovery = ["{trsvcid}"]

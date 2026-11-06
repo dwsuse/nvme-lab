@@ -130,7 +130,7 @@ whole pre-OS path of nvme-cli (dracut's nvmf module, `nvme connect-all`,
 the host identity) on a real kernel, with no hardware.
 
 ```
-lab boot setup                      # once: container, subsystems, root
+lab boot setup [--slots 4]          # once: containers, subsystems, roots
 lab sync nvme -n pr-4384            # an nvme-cli tree to test
 lab boot test --nvme pr-4384 --dracut-module ~/dracut/modules.d/74nvmf
 lab boot run v2-legacy --nvme v216 --source legacy --hostonly
@@ -156,9 +156,11 @@ the NVMe controllers and the nvme-cli registry entries it finds (the
 registry is in `/run`, which moves along) and powers the guest off.
 
 Each `run` uploads the scripts of `boot/`, installs the nvme-cli tree
-(built in `TREE/.lab-boot` with `--sysconfdir=/etc`), puts dracut's nvmf
-module in place (the package's, or `--dracut-module DIR`), builds the
-initrd and boots it. It prints `RESULT=PASS` and the root's report, or
+(built in `TREE/.lab-boot` with `--sysconfdir=/etc`, which all slots
+share, one at a time), puts dracut's nvmf module in place (the
+package's, or `--dracut-module DIR`), builds the initrd and boots it.
+A boot that fails powers off (`rd.shell=0 rd.emergency=poweroff`)
+instead of waiting in dracut's emergency shell until the timeout. It prints `RESULT=PASS` and the root's report, or
 `RESULT=FAIL`, and leaves the initrd, `lsinitrd`, dracut's log, the
 console and the report (`state.txt`) in
 `/root/scratch/lab-boot/out/NAME`. A tree's install first removes
@@ -182,6 +184,32 @@ in the examples. With nvme-cli 3 up to 3.2, the stock module's
 `rd.nvmf.discover=` fails too: it writes `--host-traddr=none` to
 `discovery.conf`, and the `nvme-fabrics.conf` that nvme-cli converts it
 to doesn't parse.
+
+#### Slots
+
+`setup --slots N` makes N boot environments that run side by side:
+each slot has its own container (`lab-boot-N`; the first is built, the
+others start from a copy of it, the image `nvme-lab/lab-boot`), its own
+root and extra subsystems with their own root file system (two guests
+must not mount one ext4), its own host identity (the target's access
+lists keep the slots apart; slot 1 keeps the identity of the lab before
+slots), and its own paths and `target.env`. `lab boot test -j N` boots N
+scenarios at a time, each in a free slot, the slowest first, and prints
+each scenario's output as one block when it is done. `lab boot run
+--slot N` and `lab boot nbft --slot N` pick a slot. A slot's directory
+is `/root/scratch/lab-boot/slot-N`; the results stay in `out/NAME` (the
+slot in `out/NAME/slot`). The CI host carries 8 slots (a guest takes 2
+CPUs and 1 GB; 16 CPUs, 15 GB): the CPU only runs out while the trees
+are built.
+
+`--nvme` of `lab boot test` can be repeated: a matrix, every scenario
+with every tree, in one run. The trees are built first, once each and
+side by side; a scenario tagged for one nvme-cli major version
+(`nvme-cli-2`, `nvme-cli-3`) only runs with the trees of that version.
+`lab sync` records the version: the tag a tree is at and the latest one
+before it (`.git/lab-describe` of the synced tree; the tags themselves
+aren't synced). The cases are `PREFIX-TREE-SCENARIO`, the verdicts name
+the tree, and the summary has a line per tree.
 
 #### NBFT boot
 
@@ -252,7 +280,9 @@ of `lab boot run`, and faults) and what to expect: whether the root's
 `/init` runs, which subsystems have controllers after switch-root and
 how many, and the registry owner, `ctrl_loss_tmo` and host NQN of their
 controllers. A scenario can be an expected failure (`xfail`, with the
-reason): XFAIL while it fails, XPASS, a failure, once it passes. The
+reason): XFAIL while it fails, XPASS, a failure, once it passes;
+`xfail_on` does the same for given nvme-cli releases, e.g. one with a
+bug fixed later (`nbft-hostnqn` on 3.0 to 3.2). The
 format is in `nvmelab/scenario.py` (and `lab boot test --help`).
 
 ```
@@ -295,7 +325,11 @@ get a current dracut (decided 2026-11-06, from repology):
 | 2.8 | oldest 2.x in a supported LTS: Ubuntu 24.04, SLE 15 SP6 | the same |
 
 ```
-lab boot test --nvme v216 --skip-tag nvme-cli-3 --skip-tag pre-os
+lab boot setup --slots 8
+for v in v3.2 v2.16 v2.13 v2.8; do lab sync nvme -C ~/nvme-cli -r $v -n ${v/./}; done
+lab sync nvme -C ~/nvme-cli -r upstream/master -n master
+lab boot test -j 8 --nvme master --nvme v32 --nvme v216 --nvme v213 \
+    --nvme v28 --dracut-module ~/dracut/modules.d/74nvmf
 ```
 
 Not tested: 1.x and 2.x before 2.5 (RHEL 8, Ubuntu 22.04, Debian 12),

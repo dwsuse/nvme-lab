@@ -5,6 +5,7 @@ A scenario is a TOML file in boot/scenarios/:
     name = "NBFT boot, one of two root paths refused"
     tags = ["nbft", "multipath", "fault"]
     xfail = "why it fails today, with a link"   # optional
+    xfail_on = { "v3.2" = "why this release fails" }   # optional
 
     [boot]                      # the options of 'lab boot run'
     source = "none"             # cmdline, static, legacy, none
@@ -48,7 +49,13 @@ boot/mkroot.sh).
 
 A scenario with xfail is expected to fail for the reason given: it is
 reported as XFAIL while it does, and as XPASS, a failure, once it passes,
-so that its expectation gets updated.
+so that its expectation gets updated. xfail_on does the same for the
+nvme-cli releases given by their tags, e.g. a release with a bug that is
+fixed later; it applies to a tree at exactly that tag ('lab sync'
+records it).
+
+The tags nvme-cli-2 and nvme-cli-3 say which major version a scenario
+needs: lab boot test leaves it out for a tree of the other one.
 """
 
 import tomllib
@@ -66,7 +73,7 @@ BOOT_KEYS = {'source': str, 'hostonly': bool, 'host_identity': bool,
 EXPECT_KEYS = {'result': str, 'controllers': list, 'paths': dict,
                'owners': dict, 'ctrl_loss_tmo': dict, 'hostnqn': dict}
 FAULT_KEYS = {'kind': str, 'path': str, 'state': str}
-TOP_KEYS = {'name', 'tags', 'xfail', 'boot', 'fault', 'expect'}
+TOP_KEYS = {'name', 'tags', 'xfail', 'xfail_on', 'boot', 'fault', 'expect'}
 
 # An identity the target doesn't let in
 OTHER_HOST_ID = '0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e'
@@ -79,6 +86,7 @@ class Scenario:
     name: str
     tags: list = field(default_factory=list)
     xfail: str | None = None
+    xfail_on: dict = field(default_factory=dict)
     boot: dict = field(default_factory=dict)
     faults: list = field(default_factory=list)
     expect: dict = field(default_factory=dict)
@@ -106,7 +114,11 @@ def load(path):
         raise ConfigError(f"{path}: unknown key '{sorted(unknown)[0]}'")
     s = Scenario(id=path.stem, name=data.get('name', path.stem),
                  tags=data.get('tags', []), xfail=data.get('xfail'),
+                 xfail_on=data.get('xfail_on', {}),
                  boot=data.get('boot', {}), expect=data.get('expect', {}))
+    if not isinstance(s.xfail_on, dict) or not all(
+            isinstance(v, str) for v in s.xfail_on.values()):
+        raise ConfigError(f'{path}: xfail_on must map tags to reasons')
     check_table(path, s.boot, BOOT_KEYS, 'boot')
     check_table(path, s.expect, EXPECT_KEYS, 'expect')
     if s.expect.get('result', 'pass') not in ('pass', 'fail'):
@@ -138,11 +150,11 @@ def find(names=(), tags=(), skip_tags=()):
 
 
 def placeholders(env):
-    """The values of the placeholders for the target ENV (boot.Env)."""
-    from .boot import EXTRA_NQN, HOST_ID, HOST_NQN, ROOT_NQN
-    values = {'traddr': env.traddr, 'root_nqn': ROOT_NQN,
-              'extra_nqn': EXTRA_NQN, 'hostnqn': HOST_NQN,
-              'hostid': HOST_ID, 'other_hostnqn': OTHER_HOST_NQN,
+    """The values of the placeholders for the slot ENV (boot.Env)."""
+    slot = env.slot
+    values = {'traddr': env.traddr, 'root_nqn': slot.root_nqn,
+              'extra_nqn': slot.extra_nqn, 'hostnqn': slot.host_nqn,
+              'hostid': slot.host_id, 'other_hostnqn': OTHER_HOST_NQN,
               'other_hostid': OTHER_HOST_ID}
     for name, key in (('root', 'trsvcid'), ('root2', 'root2'),
                       ('extra', 'extra')):
@@ -238,8 +250,23 @@ def verdict(s, passed, state, roles, values=None):
     return errors
 
 
-def outcome(s, errors):
+def xfail_reason(s, version=None):
+    """Why S is expected to fail on the nvme-cli release VERSION (a tag,
+    None for a tree that is no release), or None."""
+    return s.xfail or s.xfail_on.get(version or '')
+
+
+def applies(s, major):
+    """Whether S applies to an nvme-cli of the MAJOR version (None:
+    unknown, everything applies)."""
+    if major is None:
+        return True
+    return not any(t.startswith('nvme-cli-') and t != f'nvme-cli-{major}'
+                   for t in s.tags)
+
+
+def outcome(s, errors, version=None):
     """PASS, FAIL, XFAIL or XPASS, and whether that counts as failed."""
-    if s.xfail:
+    if xfail_reason(s, version):
         return ('XFAIL', False) if errors else ('XPASS', True)
     return ('FAIL', True) if errors else ('PASS', False)

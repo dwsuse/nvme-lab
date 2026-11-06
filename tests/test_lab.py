@@ -14,8 +14,10 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from nvmelab import (boot, ci, cli, config, faults, inventory, nbft,  # noqa: E402,E501
-                     parity, remote, scenario, sync, target)
+                     parity, remote, scenario, slots, sync, target)
 from nvmelab.config import ConfigError  # noqa: E402
+
+SLOT = slots.Slot(1)
 
 LAB = """
 [hosts.a]
@@ -301,8 +303,8 @@ class BootTest(unittest.TestCase):
             self.TARGET, ssns=['extra,nonboot', 'extra'], extra='4422'))
         self.assertEqual([(s['trsvcid'], s['nqn'], s['flags'])
                           for s in t['ssns'][1:]],
-                         [('4422', boot.EXTRA_NQN, 0x3),
-                          ('4422', boot.EXTRA_NQN, 0x1)])
+                         [('4422', SLOT.extra_nqn, 0x3),
+                          ('4422', SLOT.extra_nqn, 0x1)])
         with self.assertRaisesRegex(ConfigError, 'setup.*again'):
             boot.nbft_table(self.TARGET, ssns=['extra'])
 
@@ -311,8 +313,13 @@ class BootTest(unittest.TestCase):
                              module='/scratch/lab-boot/modules/c1',
                              source='static', hostonly=True,
                              append='rd.debug', timeout=60)
-        self.assertEqual(argv[:4], ['docker', 'exec', 'lab-boot', 'sh'])
-        self.assertEqual(argv[4], '/scratch/lab-boot/scripts/boot.sh')
+        self.assertEqual(argv[:4], ['docker', 'exec', 'lab-boot-1', 'sh'])
+        self.assertEqual(argv[4], '/scratch/lab-boot/slot-1/scripts/boot.sh')
+        self.assertEqual(argv[argv.index('--slot') + 1], '1')
+        argv3 = boot.run_argv('c1', self.TARGET, slot=slots.Slot(3))
+        self.assertEqual(argv3[2], 'lab-boot-3')
+        self.assertEqual(argv3[4], '/scratch/lab-boot/slot-3/scripts/boot.sh')
+        self.assertEqual(argv3[argv3.index('--slot') + 1], '3')
         opts = argv[5:]
         self.assertEqual(opts[opts.index('--target') + 1],
                          '192.0.2.30:4421')
@@ -355,8 +362,8 @@ class BootTest(unittest.TestCase):
             self.TARGET, ssns=['4422/nqn.x:extra,nonboot,unavailable',
                                '192.0.2.31:4423/nqn.x:other'],
             discovery=['4420', '192.0.2.32:8009']))
-        self.assertEqual(t['host_nqn'], boot.HOST_NQN)
-        self.assertEqual(t['host_id'], boot.HOST_ID)
+        self.assertEqual(t['host_nqn'], SLOT.host_nqn)
+        self.assertEqual(t['host_id'], SLOT.host_id)
         hfi, = t['hfis']
         self.assertEqual((hfi['mac'], hfi['ipaddr'], hfi['prefix'],
                           hfi['gateway']),
@@ -365,7 +372,7 @@ class BootTest(unittest.TestCase):
         self.assertEqual(hfi['pci_sbdf'], boot.GUEST_PCI_DEV << 3)
         self.assertEqual([(s['traddr'], s['trsvcid'], s['nqn'], s['flags'])
                           for s in t['ssns']],
-                         [('192.0.2.30', '4421', boot.ROOT_NQN, 0x1),
+                         [('192.0.2.30', '4421', SLOT.root_nqn, 0x1),
                           ('192.0.2.30', '4422', 'nqn.x:extra', 0x103),
                           ('192.0.2.31', '4423', 'nqn.x:other', 0x1)])
         self.assertEqual([d['uri'] for d in t['discovery']],
@@ -385,6 +392,71 @@ class BootTest(unittest.TestCase):
             boot.nbft_table(self.TARGET, root=False)
         with self.assertRaisesRegex(ConfigError, 'bad --nbft-discovery'):
             boot.nbft_table(self.TARGET, discovery=['x'])
+
+    def test_slots(self):
+        a, b = slots.slots(2)
+        self.assertEqual(a.host_id, '6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d')
+        for attr in ('container', 'dir', 'root_nqn', 'extra_nqn', 'host_id',
+                     'root_subsys_uuid', 'extra_subsys_uuid'):
+            self.assertNotEqual(getattr(a, attr), getattr(b, attr), attr)
+        self.assertEqual(b.roles, {b.root_nqn: 'root', b.extra_nqn: 'extra'})
+        self.assertEqual(b.nqn_of('root2'), b.root_nqn)
+        self.assertEqual(b.nqn_of('extra'), b.extra_nqn)
+        with self.assertRaises(ValueError):
+            slots.slots(0)
+
+    def test_nbft_table_slot(self):
+        slot = slots.Slot(2)
+        t = NbftTest.decode(boot.nbft_table(self.TARGET, ssns=['extra'],
+                                            extra='4422', slot=slot))
+        self.assertEqual((t['host_nqn'], t['host_id']),
+                         (slot.host_nqn, slot.host_id))
+        self.assertEqual([s['nqn'] for s in t['ssns']],
+                         [slot.root_nqn, slot.extra_nqn])
+
+    def test_env_slot(self):
+        env = boot.parse_env('SLOT=2\nTRADDR=192.0.2.30\n'
+                             'ROOT_PORTS=4:4433,5:4434\nEXTRA_PORTS=6:4435\n')
+        self.assertEqual(env.slot, slots.Slot(2))
+        self.assertEqual(boot.parse_env(env.text()), env)
+        # a target.env of before slots is slot 1
+        self.assertEqual(boot.parse_env('TRADDR=x\nROOT_PORTS=1:4430\n').slot,
+                         slots.Slot(1))
+        values = scenario.placeholders(env)
+        self.assertEqual((values['root_nqn'], values['hostnqn'],
+                          values['root2']),
+                         (env.slot.root_nqn, env.slot.host_nqn, '4434'))
+
+    def test_parse_describe(self):
+        self.assertEqual(sync.parse_describe('v2.16\nv2.16\n'), ('v2.16', 2))
+        self.assertEqual(sync.parse_describe('\nv3.2\n'), (None, 3))
+        self.assertEqual(sync.parse_describe(''), (None, None))
+
+    def test_expected_duration(self):
+        def load(text):
+            p = Path(self.tmp.name) / 'x.toml'
+            p.write_text(text, encoding='utf-8')
+            return scenario.load(p)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        quick = load('name = "q"\n')
+        fault = load('[[fault]]\nkind = "tcp-drop"\npath = "root2"\n')
+        failing = load('[expect]\nresult = "fail"\n')
+        order = sorted([quick, fault, failing], key=boot.expected_duration,
+                       reverse=True)
+        self.assertEqual(order, [failing, fault, quick])
+
+    def test_test_needs_slots(self):
+        orig = boot.existing_slots
+        try:
+            boot.existing_slots = lambda cfg, host: slots.slots(2)
+            with self.assertRaisesRegex(ConfigError, '--slots 3'):
+                boot.test(None, None, [], jobs=3)
+            boot.existing_slots = lambda cfg, host: []
+            with self.assertRaisesRegex(ConfigError, 'lab boot setup'):
+                boot.test(None, None, [])
+        finally:
+            boot.existing_slots = orig
 
     def test_upload_argv(self):
         cfg = config.Config(hosts={}, ssh_key=None)
@@ -554,7 +626,7 @@ class NbftTest(unittest.TestCase):
 
 class ScenarioTest(unittest.TestCase):
     TARGET = ('192.0.2.30', '4421')
-    ROLES = {boot.ROOT_NQN: 'root', boot.EXTRA_NQN: 'extra'}
+    ROLES = {SLOT.root_nqn: 'root', SLOT.extra_nqn: 'extra'}
 
     @staticmethod
     def env():
@@ -628,7 +700,7 @@ class ScenarioTest(unittest.TestCase):
                          f'rd.nvmf.hostnqn={scenario.OTHER_HOST_NQN}')
         self.assertEqual(opts['nbft_options'],
                          dict(root=True,
-                              ssns=['extra,nonboot', f'4422/{boot.ROOT_NQN}'],
+                              ssns=['extra,nonboot', f'4422/{SLOT.root_nqn}'],
                               discovery=['4421']))
         self.assertEqual(opts['fault_specs'], [
             {'kind': 'port-removed', 'path': 'root2', 'state': None}])
@@ -641,22 +713,22 @@ class ScenarioTest(unittest.TestCase):
                           opts['nbft_options'], opts['host_identity']),
                          ('cmdline', None, None, True))
 
-    STATE = (f'ctrl nvme0 tcp {boot.ROOT_NQN} state=live trsvcid=4421 '
-             f'ctrl_loss_tmo=600 hostnqn={boot.HOST_NQN}\n'
-             f'ctrl nvme1 tcp {boot.ROOT_NQN} state=live trsvcid=4422 '
-             f'ctrl_loss_tmo=off hostnqn={boot.HOST_NQN}\n'
-             f'ctrl nvme2 tcp {boot.EXTRA_NQN}\n'
+    STATE = (f'ctrl nvme0 tcp {SLOT.root_nqn} state=live trsvcid=4421 '
+             f'ctrl_loss_tmo=600 hostnqn={SLOT.host_nqn}\n'
+             f'ctrl nvme1 tcp {SLOT.root_nqn} state=live trsvcid=4422 '
+             f'ctrl_loss_tmo=off hostnqn={SLOT.host_nqn}\n'
+             f'ctrl nvme2 tcp {SLOT.extra_nqn}\n'
              'registry nvme0 owner=pre-os\nregistry nvme1 owner=pre-os\n'
              'registry nvme2 owner=\n')
 
     def test_parse_state(self):
         state = scenario.parse_state(self.STATE)
         self.assertEqual(state['nvme0'], {
-            'transport': 'tcp', 'nqn': boot.ROOT_NQN, 'state': 'live',
+            'transport': 'tcp', 'nqn': SLOT.root_nqn, 'state': 'live',
             'trsvcid': '4421', 'ctrl_loss_tmo': '600',
-            'hostnqn': boot.HOST_NQN, 'owner': 'pre-os'})
+            'hostnqn': SLOT.host_nqn, 'owner': 'pre-os'})
         self.assertEqual(state['nvme2'], {'transport': 'tcp',
-                                          'nqn': boot.EXTRA_NQN,
+                                          'nqn': SLOT.extra_nqn,
                                           'owner': None})
 
     def test_verdict(self):
@@ -672,13 +744,13 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(scenario.verdict(s, False, {}, self.ROLES, values),
                          ['boot failed, expected pass'])
         bad = scenario.parse_state(
-            f'ctrl nvme0 tcp {boot.ROOT_NQN} hostnqn=nqn.x\n'
+            f'ctrl nvme0 tcp {SLOT.root_nqn} hostnqn=nqn.x\n'
             'registry nvme0 owner=nbft\n')
         self.assertEqual(scenario.verdict(s, True, bad, self.ROLES, values), [
             "controllers of ['root'], expected ['extra', 'root']",
             'root: 1 paths, expected 2',
             "root nvme0: owner 'nbft', expected 'pre-os'",
-            f"root nvme0: hostnqn 'nqn.x', expected '{boot.HOST_NQN}'"])
+            f"root nvme0: hostnqn 'nqn.x', expected '{SLOT.host_nqn}'"])
         s = scenario.load(self.write(
             '[expect]\nctrl_loss_tmo = { root = "off" }\n'))
         self.assertEqual(scenario.verdict(s, True, good, self.ROLES), [
@@ -687,6 +759,24 @@ class ScenarioTest(unittest.TestCase):
         self.assertEqual(scenario.verdict(s, False, {}, self.ROLES), [])
         self.assertEqual(scenario.verdict(s, True, good, self.ROLES),
                          ['boot passed, expected fail'])
+
+    def test_xfail_on(self):
+        s = scenario.load(self.write('[xfail_on]\n"v3.2" = "bug"\n'))
+        self.assertEqual(scenario.outcome(s, ['e'], 'v3.2'), ('XFAIL', False))
+        self.assertEqual(scenario.outcome(s, [], 'v3.2'), ('XPASS', True))
+        self.assertEqual(scenario.outcome(s, ['e'], None), ('FAIL', True))
+        self.assertEqual(scenario.outcome(s, ['e'], 'v3.1'), ('FAIL', True))
+        self.assertEqual(scenario.xfail_reason(s, 'v3.2'), 'bug')
+        with self.assertRaisesRegex(ConfigError, 'xfail_on'):
+            scenario.load(self.write('xfail_on = "v3.2"\n'))
+
+    def test_applies(self):
+        s = scenario.load(self.write('tags = ["nbft", "nvme-cli-3"]\n'))
+        self.assertTrue(scenario.applies(s, 3))
+        self.assertFalse(scenario.applies(s, 2))
+        self.assertTrue(scenario.applies(s, None))
+        s = scenario.load(self.write('tags = ["nbft"]\n'))
+        self.assertTrue(scenario.applies(s, 2))
 
     def test_outcome(self):
         s = scenario.load(self.write('name = "x"\n'))
@@ -749,7 +839,7 @@ class FaultsTest(unittest.TestCase):
         self.assertEqual(calls, [('remove-port', '4'),
                                  ('set-ana', '5', 'inaccessible'), 'boot',
                                  ('set-ana', '5', 'optimized'),
-                                 ('add-port', boot.ROOT_NQN)])
+                                 ('add-port', SLOT.root_nqn)])
         calls.clear()
         f = faults.Faults(None, None, env, [
             faults.make('port-removed', 'root2'),
@@ -761,7 +851,7 @@ class FaultsTest(unittest.TestCase):
                     calls.append('boot')
         self.assertEqual(calls, [('remove-port', '4'),
                                  ('set-ana', '5', 'change'),
-                                 ('add-port', boot.ROOT_NQN)])
+                                 ('add-port', SLOT.root_nqn)])
 
 
 class TargetTest(unittest.TestCase):
@@ -866,7 +956,7 @@ class CliTest(unittest.TestCase):
         t = NbftTest.decode(f.read_bytes())
         self.assertEqual([(s['traddr'], s['trsvcid'], s['nqn'])
                           for s in t['ssns']],
-                         [('192.0.2.30', '4421', boot.ROOT_NQN),
+                         [('192.0.2.30', '4421', SLOT.root_nqn),
                           ('192.0.2.30', '4422', 'nqn.x:extra')])
 
     def test_boot_nbft_bad_target(self):
@@ -882,6 +972,21 @@ class CliTest(unittest.TestCase):
         rc, _, err = self.run_cli('boot', 'test', '--list', '--tag', 'nope')
         self.assertEqual(rc, 2)
         self.assertIn('no scenario selected', err)
+
+    def test_boot_run_slot_dry_run(self):
+        rc, out, _ = self.run_cli('boot', 'run', 'c1', '--slot', '2',
+                                  '--dry-run')
+        self.assertEqual(rc, 0)
+        inner = shlex.split(shlex.split(out)[-1])
+        self.assertEqual(inner[2], 'lab-boot-2')
+        self.assertEqual(inner[inner.index('--slot') + 1], '2')
+
+    def test_boot_bad_slot_count(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit):
+                cli.main(['--config', self.lab, 'boot', 'setup', '--slots',
+                          '0'])
+        self.assertIn('not a number >= 1', err.getvalue())
 
     def test_boot_run_static_needs_hostonly(self):
         rc, _, err = self.run_cli('boot', 'run', 'c1', '--source', 'static',

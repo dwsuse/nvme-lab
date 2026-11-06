@@ -17,6 +17,7 @@ from pathlib import Path
 from . import (boot, ci, config, faults, inventory, parity, remote,
                scenario, sync)
 from .config import SCRATCH, ConfigError
+from .slots import Slot
 
 
 def cmd_hosts(cfg, args):
@@ -90,6 +91,16 @@ def cmd_scratch(cfg, args):
                       'du -sh -- * 2>/dev/null || true').returncode
 
 
+def positive(text):
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"'{text}' is not a number >= 1")
+    return n
+
+
 def boot_hosts(cfg, args):
     host = cfg.host(args.host) if args.host else cfg.ci_host()
     return host, cfg.host(args.target)
@@ -97,7 +108,7 @@ def boot_hosts(cfg, args):
 
 def cmd_boot_setup(cfg, args):
     host, target = boot_hosts(cfg, args)
-    boot.setup(cfg, host, target, recreate=args.recreate)
+    boot.setup(cfg, host, target, recreate=args.recreate, count=args.slots)
     return 0
 
 
@@ -122,6 +133,7 @@ def cmd_boot_run(cfg, args):
                    append=' '.join(args.append) or None,
                    timeout=args.timeout)
     fault_specs = [faults.parse(f) for f in args.fault]
+    slot = Slot(args.slot)
     if args.dry_run:
         if nbft is not None:
             # check it
@@ -130,14 +142,15 @@ def cmd_boot_run(cfg, args):
                              module=args.dracut_module and
                              f'{boot.CONTAINER_DIR}/modules/{args.name}',
                              nbft_file=nbft is not None and
-                             boot.nbft_path(args.name)[1],
+                             boot.nbft_path(args.name)[1], slot=slot,
                              **options)
         print(shlex.join(remote.ssh_argv(cfg, host, argv)))
         for f in fault_specs:
             print(f"fault: {f['kind']} on {f['path']}")
         return 0
     return boot.run(cfg, host, args.name, module=args.dracut_module,
-                    nbft_options=nbft, fault_specs=fault_specs, **options)
+                    nbft_options=nbft, fault_specs=fault_specs, slot=slot,
+                    **options)
 
 
 def cmd_boot_test(cfg, args):
@@ -148,12 +161,14 @@ def cmd_boot_test(cfg, args):
         width = max(len(s.id) for s in scenarios)
         for s in scenarios:
             xfail = ' (xfail)' if s.xfail else ''
+            if s.xfail_on:
+                xfail += f" (xfail on {', '.join(s.xfail_on)})"
             print(f"{s.id:{width}}  {s.name}{xfail} [{', '.join(s.tags)}]")
         return 0
     host = cfg.host(args.host) if args.host else cfg.ci_host()
     failed = boot.test(cfg, host, scenarios, prefix=args.prefix,
-                       module=args.dracut_module, tree=args.nvme,
-                       package=args.nvme_package)
+                       module=args.dracut_module, trees=args.nvme,
+                       package=args.nvme_package, jobs=args.jobs)
     return 1 if failed else 0
 
 
@@ -165,9 +180,10 @@ def cmd_boot_nbft(cfg, args):
                               'TRADDR:TRSVCID')
     else:
         host = cfg.host(args.host) if args.host else cfg.ci_host()
-        env = boot.read_env(cfg, host)
+        env = boot.read_env(cfg, host, Slot(args.slot))
         target, extra = env.target, env.paths.get('extra', (0, None))[1]
-    data = boot.nbft_table(target, extra=extra, **nbft_options(args))
+    data = boot.nbft_table(target, extra=extra, slot=Slot(args.slot),
+                           **nbft_options(args))
     Path(args.file).write_bytes(data)
     print(f'{args.file}: NBFT, {len(data)} bytes')
     return 0
@@ -289,8 +305,14 @@ def parser():
                    help='the NVMe/TCP target host (default: nvmet)')
     b.add_argument('--recreate', action='store_true',
                    help='create the container anew')
+    b.add_argument('--slots', type=positive, default=1, metavar='N',
+                   help='N environments that boot side by side, each with '
+                   'its own container, subsystems and host identity '
+                   '(default: 1)')
     b.set_defaults(fn=cmd_boot_setup)
     b = bsub.add_parser('run', help='build an initrd and boot it')
+    b.add_argument('--slot', type=positive, default=1, metavar='N',
+                   help='the slot to boot in (default: 1)')
     b.add_argument('name', help='the case, results in '
                    f'{boot.BOOT_DIR}/out/NAME')
     b.add_argument('--host', help='default: the host with ci = true')
@@ -341,12 +363,18 @@ def parser():
                    'PREFIX-SCENARIO (default: t)')
     b.add_argument('--host', help='default: the host with ci = true')
     nvme = b.add_mutually_exclusive_group()
-    nvme.add_argument('--nvme', metavar='TREE', help='build and install '
-                      f'the nvme-cli tree {SCRATCH}/TREE (lab sync)')
+    nvme.add_argument('--nvme', metavar='TREE', action='append',
+                      default=[], help='build and install the nvme-cli '
+                      f'tree {SCRATCH}/TREE (lab sync); repeat it for a '
+                      'matrix: every scenario with every tree, the '
+                      'version-specific ones only with their trees')
     nvme.add_argument('--nvme-package', action='store_true',
                       help="reinstall the distribution's nvme-cli")
     b.add_argument('--dracut-module', metavar='DIR', help="a local "
                    "directory to use as dracut's 74nvmf module")
+    b.add_argument('-j', '--jobs', type=positive, default=1, metavar='N',
+                   help='boot N scenarios at a time, one per slot of setup '
+                   '(default: 1)')
     b.add_argument('--list', action='store_true',
                    help='list the selected scenarios, run nothing')
     b.set_defaults(fn=cmd_boot_test)
@@ -355,6 +383,8 @@ def parser():
     b.add_argument('file', help="the table, e.g. for 'nvme nbft show "
                    "--nbft-path DIR' (name it NBFT)")
     b.add_argument('--host', help='default: the host with ci = true')
+    b.add_argument('--slot', type=positive, default=1, metavar='N',
+                   help="the slot whose identity and ports the table has")
     b.add_argument('--target-addr', metavar='TRADDR:TRSVCID',
                    help='the root subsystem (default: the one of '
                    "'lab boot setup')")

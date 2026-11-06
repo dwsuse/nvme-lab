@@ -6,7 +6,8 @@
 #           [--nvme-tree DIR | --nvme-package] [--dracut-module DIR]
 #           [--source cmdline|static|legacy|none] [--hostonly]
 #           [--no-host-identity] [--append ARGS] [--timeout SECONDS]
-#           [--nbft FILE]
+#           [--nbft FILE] [--slot N]
+#   boot.sh --build-only --nvme-tree DIR
 #
 # --nvme-tree      build the nvme-cli tree in DIR and install it
 #                  (default: keep the nvme that is installed)
@@ -26,12 +27,16 @@
 #                  /etc/nvme files. Otherwise the host identity goes on
 #                  the kernel command line (rd.nvmf.hostnqn/hostid).
 # --no-host-identity  not even that: the initrd has no host identity
+# --slot           the slot of 'lab boot' this container belongs to
+#                  (default 1), recorded in the results
+# --build-only     only build the tree of --nvme-tree, install nothing,
+#                  boot nothing (no --name, --target, --root-uuid needed)
 # --nbft           give the guest FILE as its NBFT ACPI table. Its HFI
 #                  must be the guest's NIC (GUEST_MAC, 10.0.2.15/24 via
 #                  10.0.2.2); the network setup comes from it, no ip=.
 #
 # Results in /scratch/lab-boot/out/NAME: log, dracut.log, lsinitrd.txt,
-# console.txt, state.txt (the NVMe controllers and nvme-cli registry
+# console.txt, slot, state.txt (the NVMe controllers and nvme-cli registry
 # entries the root saw, see mkroot.sh) and NBFT. Prints RESULT=PASS and
 # the state, or RESULT=FAIL; exits 0 on PASS, 1 on FAIL, 2 when the case
 # could not be set up.
@@ -41,7 +46,7 @@ NAME='' TARGET='' UUID='' TREE='' PACKAGE='' MODULE='' HOSTONLY='' APPEND=''
 IDENTITY=1
 # What the last tree installed (meson's install log)
 INSTALLED=/root/lab-boot-installed.txt
-SOURCE=cmdline TIMEOUT=240 NBFT=''
+SOURCE=cmdline TIMEOUT=240 NBFT='' SLOT=1 BUILD_ONLY=''
 # The guest's NIC; nvmelab/boot.py writes the same into the HFI of an NBFT.
 GUEST_MAC=52:54:00:12:34:56 GUEST_PCI_DEV=3
 usage() { sed -n '4,9p' "$0" >&2; exit 2; }
@@ -59,24 +64,12 @@ while [ $# -gt 0 ]; do
         --append) APPEND=$2; shift ;;
         --timeout) TIMEOUT=$2; shift ;;
         --nbft) NBFT=$2; shift ;;
+        --slot) SLOT=$2; shift ;;
+        --build-only) BUILD_ONLY=1 ;;
         *) usage ;;
     esac
     shift
 done
-if [ -z "$NAME" ] || [ -z "$TARGET" ] || [ -z "$UUID" ]; then
-    usage
-fi
-TRADDR=${TARGET%:*} TRSVCID=${TARGET##*:}
-if [ -n "$NBFT" ] && [ ! -f "$NBFT" ]; then
-    echo "no NBFT $NBFT" >&2
-    exit 2
-fi
-
-OUT=/scratch/lab-boot/out/$NAME
-rm -rf "$OUT"
-mkdir -p "$OUT"
-fail() { echo "SETUP FAILED: $*" | tee -a "$OUT/log" >&2; exit 2; }
-
 # Remove the files the last tree installed, but not the host identity.
 uninstall_tree() {
     [ -f "$INSTALLED" ] || return 0
@@ -89,23 +82,58 @@ uninstall_tree() {
     rm -f "$INSTALLED"
 }
 
+# Build TREE in its build directory, DIR/.lab-boot, which all slots share
+# (their containers are copies of one): one slot at a time, also for the
+# install, which writes the build directory's install log.
+# The tree belongs to root on the host; meson asks git for the version.
+# sysconfdir: Tumbleweed's meson defaults to /usr/etc, dracut installs
+# /etc/nvme. With INSTALL, install it too and keep the install log.
+# nvme-cli 2 always builds its own libnvme (--force-fallback-for): a
+# libnvme another tree installed must not end up in the build.
+build_tree() {
+    git config --global --add safe.directory '*'
+    # shellcheck disable=SC2016 # expanded by the inner shell
+    flock "$TREE/.lab-boot.lock" sh -c '
+        BUILD=$1/.lab-boot
+        if [ ! -f "$BUILD/build.ninja" ]; then
+            meson setup "$BUILD" "$1" --prefix=/usr --sysconfdir=/etc \
+                --wrap-mode=default --force-fallback-for=libnvme \
+                --buildtype=release -Ddocs=false || exit 2
+        fi
+        ninja -C "$BUILD" >/dev/null || exit 2
+        [ -n "$2" ] || exit 0
+        meson install -C "$BUILD" --no-rebuild --quiet || exit 2
+        cp "$BUILD/meson-logs/install-log.txt" "$2"' build "$TREE" "${1:-}"
+}
+
+if [ -n "$BUILD_ONLY" ]; then
+    [ -n "$TREE" ] || usage
+    # Nothing of another tree's install for meson to find
+    uninstall_tree
+    build_tree
+    exit
+fi
+if [ -z "$NAME" ] || [ -z "$TARGET" ] || [ -z "$UUID" ]; then
+    usage
+fi
+TRADDR=${TARGET%:*} TRSVCID=${TARGET##*:}
+if [ -n "$NBFT" ] && [ ! -f "$NBFT" ]; then
+    echo "no NBFT $NBFT" >&2
+    exit 2
+fi
+
+OUT=/scratch/lab-boot/out/$NAME
+rm -rf "$OUT"
+mkdir -p "$OUT"
+echo "$SLOT" > "$OUT/slot"
+fail() { echo "SETUP FAILED: $*" | tee -a "$OUT/log" >&2; exit 2; }
+
 {
     if [ -n "$TREE" ] || [ -n "$PACKAGE" ]; then
         uninstall_tree
     fi
     if [ -n "$TREE" ]; then
-        # The tree belongs to root on the host; meson asks git for the
-        # version. sysconfdir: Tumbleweed's meson defaults to /usr/etc,
-        # dracut installs /etc/nvme.
-        git config --global --add safe.directory '*'
-        if [ ! -f "$TREE/.lab-boot/build.ninja" ]; then
-            meson setup "$TREE/.lab-boot" "$TREE" --prefix=/usr \
-                --sysconfdir=/etc --wrap-mode=default \
-                --buildtype=release -Ddocs=false || exit 2
-        fi
-        ninja -C "$TREE/.lab-boot" >/dev/null || exit 2
-        meson install -C "$TREE/.lab-boot" --no-rebuild --quiet || exit 2
-        cp "$TREE/.lab-boot/meson-logs/install-log.txt" "$INSTALLED"
+        build_tree "$INSTALLED" || exit 2
         ldconfig
     elif [ -n "$PACKAGE" ]; then
         zypper -q --non-interactive install -y -f nvme-cli || exit 2
@@ -124,6 +152,9 @@ rm -rf /etc/nvme/discovery.conf /etc/nvme/config.json \
 for KVER in /lib/modules/*; do KVER=${KVER##*/}; break; done
 CMDLINE="console=ttyS0 net.ifnames=0 root=UUID=$UUID rw init=/init panic=-1"
 CMDLINE="$CMDLINE rd.retry=10 rd.neednet=1"
+# A boot that fails powers off instead of waiting in dracut's emergency
+# shell until the timeout
+CMDLINE="$CMDLINE rd.shell=0 rd.emergency=poweroff"
 if [ -z "$NBFT" ]; then
     CMDLINE="$CMDLINE ip=10.0.2.15::10.0.2.2:255.255.255.0:guest:eth0:none"
 fi

@@ -50,6 +50,24 @@ def changes(top):
     return (changed + untracked), deleted
 
 
+def describe_tags(top, sha):
+    """[the tag at SHA or '', the nearest tag before it or '']."""
+    def tag(*args):
+        out = subprocess.run(['git', '-C', str(top), 'describe', '--tags',
+                              *args, sha], capture_output=True)
+        return out.stdout.decode().strip() if out.returncode == 0 else ''
+    return [tag('--exact-match', '--match', 'v[0-9]*'),
+            tag('--abbrev=0', '--match', 'v[0-9]*')]
+
+
+def parse_describe(text):
+    """(exact tag or None, major version or None) of a lab-describe."""
+    lines = (text.splitlines() + ['', ''])[:2]
+    exact = lines[0].strip() or None
+    m = re.match(r'v?(\d+)\.', lines[1].strip() or (exact or ''))
+    return exact, int(m.group(1)) if m else None
+
+
 def sync(cfg, host, tree='.', name=None, ref='HEAD', worktree=False,
          log=print):
     try:
@@ -72,6 +90,11 @@ def sync(cfg, host, tree='.', name=None, ref='HEAD', worktree=False,
                    check=True, env=env)
     remote.run(cfg, host, f'git -C {q} checkout -q -f --detach {sha}',
                check=True)
+    # Only the commit is pushed, not the tags: record what 'git describe'
+    # says here, for the lab tools that need a tree's version.
+    describe = '\n'.join(describe_tags(top, sha)) + '\n'
+    remote.run(cfg, host, f'cat > {q}/.git/lab-describe',
+               input=describe.encode(), check=True)
     log(f'{host.name}:{dest} at {sha[:12]} ({ref})')
 
     if worktree:
