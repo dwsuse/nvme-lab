@@ -16,6 +16,8 @@ $L hosts                                   # nvme, nvmet, nvme-bsd
 $L inventory [HOST...]                     # read only; first thing in a session
 $L sync HOST [-C TREE] [-n NAME] [-w]      # git tree -> /root/scratch/NAME
 $L ci IMAGE NAME [--pull] -- COMMAND       # CI image on nvme, tree NAME
+$L parity NAME [-C TREE] [-r REF] [-w] [--only JOB...] [--pull]
+                                           # CI parity: 4 jobs in parallel
 $L ssh HOST [COMMAND...]                   # remote shell runs the words
 $L scratch HOST [--rm NAME...]             # list / remove scratch trees
 $L boot setup | run NAME [...] | teardown  # boot QEMU from an NVMe/TCP root
@@ -25,15 +27,18 @@ $L boot setup | run NAME [...] | teardown  # boot QEMU from an NVMe/TCP root
   a real git checkout, incremental, build dir kept. `-w` also copies
   uncommitted changes. NAME defaults to the tree's directory name; use
   the branch or PR (`pr-4376`).
-- `ci` images: debian, tumbleweed, fedora, ... (`ghcr.io/linux-nvme/*`).
-  CI parity for an nvme-cli PR before pushing:
-  `lab ci debian N -- scripts/build.sh -b release -c gcc`, same with
-  `tumbleweed`, and `lab ci debian N -- scripts/build.sh -m muon`.
-  nvme-cli's main CI matrix runs `build.sh -b B -c C -x` (valgrind):
-  run that too, as `lab ci debian N -- 'ulimit -n 4096 && scripts/build.sh
-  -b release -c clang -x'` (valgrind refuses docker's huge fd limit).
-  Parallel jobs need one synced tree each (`-n N-deb`, `-n N-tw`):
-  `build.sh` owns `.build-ci` in the tree.
+- CI parity for an nvme-cli PR before pushing: `lab parity N` (run in
+  the nvme-cli tree, or `-C TREE`; `-r BRANCH` for a branch that isn't
+  checked out). It syncs one tree per job (`N-deb`, `N-tw`, `N-muon`,
+  `N-val`: `build.sh` owns `.build-ci` in its tree) and runs in
+  parallel: debian and tumbleweed `build.sh -b release -c gcc`, debian
+  `build.sh -m muon`, and debian `build.sh -b release -c clang -x`
+  (valgrind, with `ulimit -n 4096`: valgrind refuses docker's huge fd
+  limit). One PASS/FAIL line per job with the test counts; full logs in
+  `~/.cache/nvme-lab/parity/N/JOB.log`. The trees stay for the next run.
+  `--only JOB...` for a subset, `--dry-run` shows the commands.
+- `ci` images: debian, tumbleweed, fedora, ... (`ghcr.io/linux-nvme/*`),
+  for single runs (`lab ci debian N -- scripts/update-docs.sh`).
   `--pull` first if the image may be old. Default Docker network on
   nvme has no DNS: for apt/pip use `docker run --network host` via ssh.
 - nvme has docker, not podman. Screenshots of a static HTML page (no

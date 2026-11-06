@@ -13,7 +13,7 @@ import shlex
 import subprocess
 import sys
 
-from . import boot, ci, config, inventory, remote, sync
+from . import boot, ci, config, inventory, parity, remote, sync
 from .config import SCRATCH, ConfigError
 
 
@@ -64,6 +64,19 @@ def cmd_ci(cfg, args):
         print(shlex.join(argv))
         return 0
     return subprocess.run(argv).returncode
+
+
+def cmd_parity(cfg, args):
+    host = cfg.host(args.host) if args.host else cfg.ci_host()
+    jobs = parity.select(args.only)
+    log_dir = args.log_dir or parity.default_log_dir(args.name)
+    if args.dry_run:
+        for job in jobs:
+            print(f'{job.name}: '
+                  f'{shlex.join(parity.job_argv(cfg, host, args.name, job))}')
+        return 0
+    return parity.run(cfg, host, args.name, jobs, log_dir, tree=args.tree,
+                      ref=args.ref, worktree=args.worktree, pull=args.pull)
 
 
 def cmd_scratch(cfg, args):
@@ -167,6 +180,30 @@ def parser():
     s.add_argument('--dry-run', action='store_true',
                    help='print the ssh command, run nothing')
     s.set_defaults(fn=cmd_ci)
+
+    s = sub.add_parser('parity', help='the CI-parity runs of an nvme-cli '
+                       'tree, in parallel',
+                       description=parity.__doc__,
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
+    s.add_argument('name', help='base name of the trees, NAME-JOB in '
+                   f'{SCRATCH}')
+    s.add_argument('-C', '--tree', default='.',
+                   help='the local git tree (default: .)')
+    s.add_argument('-r', '--ref', default='HEAD',
+                   help='commit to test (default: HEAD)')
+    s.add_argument('-w', '--worktree', action='store_true',
+                   help='also the uncommitted changes')
+    s.add_argument('--only', nargs='+', metavar='JOB',
+                   help='run only these jobs: ' +
+                   ', '.join(j.name for j in parity.JOBS))
+    s.add_argument('--pull', action='store_true',
+                   help='pull the newest images first')
+    s.add_argument('--log-dir', help='default: '
+                   '~/.cache/nvme-lab/parity/NAME')
+    s.add_argument('--host', help='default: the host with ci = true')
+    s.add_argument('--dry-run', action='store_true',
+                   help='print the ssh commands, sync and run nothing')
+    s.set_defaults(fn=cmd_parity)
 
     s = sub.add_parser('boot', help='boot a QEMU guest from an NVMe/TCP '
                        'root, with dracut',

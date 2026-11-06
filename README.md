@@ -15,6 +15,7 @@ lab hosts                                  # the VMs of lab.toml
 lab inventory                              # what's on them (read only)
 lab sync nvme -n pr-1234                   # this git tree -> /root/scratch/pr-1234
 lab ci debian pr-1234 -- scripts/build.sh  # in an nvme-cli CI image
+lab parity pr-1234                         # all CI-parity runs, in parallel
 lab ssh nvme-bsd                           # log in
 ```
 

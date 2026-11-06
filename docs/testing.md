@@ -73,6 +73,22 @@ lab ci debian pr-4376 -- scripts/build.sh -m muon
 lab ci debian pr-4376 -- scripts/update-docs.sh    # man/html pages
 ```
 
+All of nvme-cli's CI-parity runs at once, each in its own tree
+(`build.sh` owns the `.build-ci` of its tree):
+
+```
+lab parity pr-4376                 # in the nvme-cli tree
+lab parity pr-4376 -r my-branch    # a branch that isn't checked out
+lab parity pr-4376 --only val      # just the valgrind job
+```
+
+It syncs `pr-4376-deb`, `-tw`, `-muon` and `-val` and runs, in parallel,
+debian and tumbleweed `build.sh -b release -c gcc`, debian `build.sh -m
+muon`, and debian `build.sh -b release -c clang -x` under valgrind (with
+`ulimit -n 4096`: valgrind refuses docker's huge fd limit). It prints one
+PASS/FAIL line per job with the test counts, and keeps the full logs in
+`~/.cache/nvme-lab/parity/pr-4376/` and the trees for the next run.
+
 `--pull` gets the newest image first (CI always uses the newest);
 `--dry-run` prints the command. `build.sh` removes its build directory
 first, so these runs don't disturb a `.build` of your own. Containers

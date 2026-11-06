@@ -12,7 +12,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from nvmelab import boot, ci, cli, config, inventory, remote, sync  # noqa: E402,E501
+from nvmelab import boot, ci, cli, config, inventory, parity, remote, sync  # noqa: E402,E501
 from nvmelab.config import ConfigError  # noqa: E402
 
 LAB = """
@@ -176,6 +176,71 @@ class CiTest(unittest.TestCase):
         self.assertTrue(argv[-1].endswith('&& make'))
 
 
+MESON_LOG = """\
+ 1/2 unit - x - a OK 0.1s
+Ok:                281
+Expected Fail:     10
+Fail:              0
+Unexpected Pass:   0
+Skipped:           0
+Timeout:           0
+"""
+
+MESON_TWO_LOGS = MESON_LOG + """\
+Ok:                279
+Expected Fail:     10
+Fail:              1
+Skipped:           2
+"""
+
+MUON_LOG = """\
+running tests for project 'nvme-cli'
+finished 138 tests, 2 expected fail, 0 fail, 2 skipped
+"""
+
+
+class ParityTest(unittest.TestCase):
+    def test_jobs(self):
+        self.assertEqual([j.name for j in parity.JOBS],
+                         ['deb', 'tw', 'muon', 'val'])
+        val = parity.select(['val'])[0]
+        self.assertIn('ulimit -n 4096 && ', val.command)
+        self.assertIn(' -x', val.command)
+
+    def test_select(self):
+        self.assertEqual(parity.select([]), list(parity.JOBS))
+        self.assertEqual([j.name for j in parity.select(['val', 'deb'])],
+                         ['deb', 'val'])
+        with self.assertRaisesRegex(ConfigError, "unknown job 'x'"):
+            parity.select(['x'])
+
+    def test_tree_name(self):
+        job = parity.select(['tw'])[0]
+        self.assertEqual(parity.tree_name('pr-1', job), 'pr-1-tw')
+        with self.assertRaises(ConfigError):
+            parity.tree_name('../x', job)
+
+    def test_default_log_dir(self):
+        self.assertEqual(parity.default_log_dir(
+            'pr-1', env={'XDG_CACHE_HOME': '/c'}),
+            Path('/c/nvme-lab/parity/pr-1'))
+
+    def test_summarize_meson(self):
+        self.assertEqual(parity.summarize(MESON_LOG),
+                         '281 ok, 10 expected fail, 0 fail')
+
+    def test_summarize_last_meson_summary(self):
+        self.assertEqual(parity.summarize(MESON_TWO_LOGS),
+                         '279 ok, 10 expected fail, 1 fail, 2 skipped')
+
+    def test_summarize_muon(self):
+        self.assertEqual(parity.summarize(MUON_LOG),
+                         '138 tests, 2 expected fail, 0 fail, 2 skipped')
+
+    def test_summarize_none(self):
+        self.assertIsNone(parity.summarize('error: no compiler\n'))
+
+
 class SyncTest(unittest.TestCase):
     def test_names(self):
         for good in ('wt-4351', 'a.b_c', 'X1'):
@@ -321,6 +386,34 @@ class CliTest(unittest.TestCase):
                                   '--dry-run')
         self.assertEqual(rc, 2)
         self.assertIn('needs --hostonly', err)
+
+    def test_parity_dry_run(self):
+        rc, out, _ = self.run_cli('parity', 'pr-1', '--dry-run')
+        self.assertEqual(rc, 0)
+        lines = out.splitlines()
+        self.assertEqual([ln.split(':')[0] for ln in lines],
+                         ['deb', 'tw', 'muon', 'val'])
+        for line, tree in zip(lines, ('deb', 'tw', 'muon', 'val')):
+            argv = shlex.split(line.split(': ', 1)[1])
+            self.assertEqual(argv[argv.index('--') - 1], 'root@a.lan')
+            docker = shlex.split(argv[-1])
+            self.assertIn(f'/root/scratch/pr-1-{tree}:/src', docker)
+        self.assertIn('ghcr.io/linux-nvme/tumbleweed:latest',
+                      shlex.split(shlex.split(
+                          lines[1].split(': ', 1)[1])[-1]))
+
+    def test_parity_only(self):
+        rc, out, _ = self.run_cli('parity', 'pr-1', '--only', 'muon',
+                                  '--dry-run')
+        self.assertEqual(rc, 0)
+        self.assertEqual([ln.split(':')[0] for ln in out.splitlines()],
+                         ['muon'])
+
+    def test_parity_unknown_job(self):
+        rc, _, err = self.run_cli('parity', 'pr-1', '--only', 'nope',
+                                  '--dry-run')
+        self.assertEqual(rc, 2)
+        self.assertIn("unknown job 'nope'", err)
 
     def test_ci_needs_command(self):
         rc, _, err = self.run_cli('ci', 'debian', 't', '--dry-run')
