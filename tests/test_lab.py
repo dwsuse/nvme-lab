@@ -13,8 +13,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from nvmelab import (boot, ci, cli, config, faults, inventory, nbft,  # noqa: E402,E501
-                     parity, remote, scenario, slots, sync, target)
+from nvmelab import (boot, ci, cli, config, dashboard, faults,  # noqa: E402,E501
+                     inventory, nbft, parity, remote, scenario, slots,
+                     sync, target)
 from nvmelab.config import ConfigError  # noqa: E402
 
 SLOT = slots.Slot(1)
@@ -880,6 +881,98 @@ class TargetTest(unittest.TestCase):
         cfg = config.Config(hosts={}, target_control='/nonexistent/tool')
         with self.assertRaisesRegex(ConfigError, 'no nvme-target-control'):
             target.TargetControl(cfg, config.Host('t', 't.lan'), 'x')
+
+
+class DashboardTest(unittest.TestCase):
+    STARTED = __import__('datetime').datetime(2026, 11, 6, 20, 1, 2)
+
+    def cases(self):
+        def sc(sid, xfail=None):
+            return scenario.Scenario(id=sid, name=sid, xfail=xfail)
+        v216 = boot.Tree('v216', version='v2.16', major=2)
+        master = boot.Tree('master', major=3)
+        return [
+            boot.Case(v216, sc('nbft'), 't-v216-nbft', 'PASS', False,
+                      duration=12.4),
+            boot.Case(v216, sc('ctl'), 't-v216-ctl', 'XFAIL', False,
+                      ["root nvme0: ctrl_loss_tmo '600'"], 'not yet', 20),
+            boot.Case(master, sc('nbft'), 't-master-nbft', 'FAIL', True,
+                      ['boot failed, expected pass'], None, 30),
+            boot.Case(master, sc('ctl'), 't-master-ctl', 'XPASS', True,
+                      [], 'not yet', 9)]
+
+    def test_record(self):
+        rec = dashboard.record(self.cases(), self.STARTED, 'dracut: x')
+        self.assertEqual((rec['workflow'], rec['run_id'], rec['date'],
+                          rec['outcome'], rec['jobs'], rec['warnings']),
+                         ('Boot tests', '20261106-200102',
+                          '2026-11-06 20:01:02', 'fail', [], ['dracut: x']))
+        v216, master = rec['sections']
+        self.assertEqual((v216['name'], v216['outcome'], v216['counts']),
+                         ('nvme-cli v2.16', 'pass',
+                          {'pass': 1, 'fail': 0, 'expected fail': 1}))
+        self.assertEqual((master['name'], master['outcome'],
+                          master['problems']),
+                         ('nvme-cli master', 'fail',
+                          ['2 failed: nbft, ctl']))
+        passed, xfail = v216['tests']
+        self.assertEqual(passed, {'test': 'nbft', 'config': 'v216',
+                                  'status': 'pass', 'duration': '12s'})
+        self.assertEqual((xfail['status'], xfail['reason']),
+                         ('expected fail', 'not yet'))
+        self.assertEqual(xfail['files'][0],
+                         {'href': 'logs/t-v216-ctl/console.txt',
+                          'name': 'console'})
+        failed, xpass = master['tests']
+        self.assertEqual((failed['status'], failed['reason']),
+                         ('fail', 'boot failed, expected pass'))
+        self.assertEqual(xpass['status'], 'fail')
+        self.assertIn('expected to fail: not yet', xpass['reason'])
+        self.assertEqual(rec['problems'],
+                         ['nvme-cli master: 2 failed: nbft, ctl'])
+        json_text = __import__('json').dumps(rec)
+        self.assertIn('Boot tests', json_text)
+
+    def test_record_all_good(self):
+        rec = dashboard.record(self.cases()[:2], self.STARTED)
+        self.assertEqual((rec['outcome'], rec['conclusion'],
+                          rec['warnings']), ('pass', 'success', []))
+        self.assertEqual(dashboard.record([], self.STARTED)['problems'],
+                         ['no results'])
+
+    def test_site_argv(self):
+        cmd = dashboard.site_argv('20261106-200102',
+                                  [('dracut #2820', 'https://x/2820')])
+        self.assertIn('/root/scratch/lab-dashboard-tool/scripts/dashboard/'
+                      'nvme-dashboard site -o /root/scratch/lab-dashboard/'
+                      'site', cmd)
+        self.assertIn('--primary \'Boot tests\'', cmd)
+        self.assertIn("--link 'dracut #2820=https://x/2820'", cmd)
+        self.assertIn('--history /root/scratch/lab-dashboard/site/'
+                      'history.json', cmd)
+
+    def test_describe_module(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(dashboard.describe_module(d),
+                             f'dracut module {d}')
+            subprocess.run(['git', 'init', '-q', '-b', 'pr', d], check=True)
+            (Path(d) / 'm.sh').write_text('x\n', encoding='utf-8')
+            git = ['git', '-C', d, '-c', 'user.name=t', '-c',
+                   'user.email=t@t']
+            subprocess.run(git + ['add', '.'], check=True)
+            subprocess.run(git + ['commit', '-q', '-m', 'fix it'], check=True)
+            text = dashboard.describe_module(d)
+            self.assertRegex(text, r'^dracut pr [0-9a-f]+ fix it$')
+            (Path(d) / 'm.sh').write_text('y\n', encoding='utf-8')
+            self.assertTrue(dashboard.describe_module(d).endswith(
+                ' (modified)'))
+
+    def test_parse_link(self):
+        self.assertEqual(dashboard.parse_link('a=https://b'),
+                         ('a', 'https://b'))
+        for bad in ('a', '=x', 'a='):
+            with self.assertRaises(ConfigError):
+                dashboard.parse_link(bad)
 
 
 class CliTest(unittest.TestCase):

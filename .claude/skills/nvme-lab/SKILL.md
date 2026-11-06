@@ -73,6 +73,11 @@ $L boot nbft FILE [--nbft-ssns ...]        # write the NBFT of a case
   -j 8`; 8 slots fit the CI host. Repeat `--nvme TREE` for a version
   matrix in one run (version-specific scenarios only with their trees;
   `xfail_on` for known bugs of a release).
+- Results for the user to look at: `lab boot test ... --dashboard` renders
+  nvme-cli's dashboard (scripts/dashboard of ~/nvme-cli) with the run
+  added; it prints the file:// URL of the local site
+  (~/.cache/nvme-lab/dashboard/index.html). History accumulates on the
+  CI host in /root/scratch/lab-dashboard.
 - Faults while the guest boots: `--fault KIND:PATH` on `lab boot run` or
   `[[fault]]` in a scenario: `port-removed` and `ana:STATE` on the target
   (nvme-target-control), `tcp-refuse` and `tcp-drop` on the CI host's

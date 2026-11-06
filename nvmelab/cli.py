@@ -14,8 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import (boot, ci, config, faults, inventory, parity, remote,
-               scenario, sync)
+from . import (boot, ci, config, dashboard, faults, inventory, parity,
+               remote, scenario, sync)
 from .config import SCRATCH, ConfigError
 from .slots import Slot
 
@@ -166,10 +166,16 @@ def cmd_boot_test(cfg, args):
             print(f"{s.id:{width}}  {s.name}{xfail} [{', '.join(s.tags)}]")
         return 0
     host = cfg.host(args.host) if args.host else cfg.ci_host()
-    failed = boot.test(cfg, host, scenarios, prefix=args.prefix,
-                       module=args.dracut_module, trees=args.nvme,
-                       package=args.nvme_package, jobs=args.jobs)
-    return 1 if failed else 0
+    started = datetime.datetime.now(datetime.timezone.utc)
+    cases = boot.test(cfg, host, scenarios, prefix=args.prefix,
+                      module=args.dracut_module, trees=args.nvme,
+                      package=args.nvme_package, jobs=args.jobs)
+    if args.dashboard:
+        links = [dashboard.parse_link(lk) for lk in args.dashboard_link]
+        site = dashboard.publish(cfg, host, cases, started, args.dashboard,
+                                 module=args.dracut_module, links=links)
+        print(f'dashboard: {site.as_uri()}/index.html')
+    return 1 if any(c.bad for c in cases) else 0
 
 
 def cmd_boot_nbft(cfg, args):
@@ -377,6 +383,13 @@ def parser():
                    '(default: 1)')
     b.add_argument('--list', action='store_true',
                    help='list the selected scenarios, run nothing')
+    b.add_argument('--dashboard', nargs='?', const=True, metavar='DIR',
+                   help="add the results to nvme-cli's dashboard and put "
+                   'the site into DIR (default: '
+                   f'{dashboard.DEFAULT_DIR}), for a browser')
+    b.add_argument('--dashboard-link', action='append', default=[],
+                   metavar='TEXT=URL', help='a link on the dashboard, e.g. '
+                   'to the dracut pull request tested (repeatable)')
     b.set_defaults(fn=cmd_boot_test)
     b = bsub.add_parser('nbft', help="write the NBFT of 'lab boot run "
                         "--nbft' to a file")

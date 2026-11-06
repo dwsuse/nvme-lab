@@ -311,6 +311,27 @@ nvme-cli 2 without a registry, and the registry owners and
 after switch-root (adoption, reconnects, shutdown) needs the OS, which
 the busybox root doesn't run: nvme-cli's mock scenarios cover that.
 
+#### Dashboard
+
+`lab boot test --dashboard [DIR]` adds the results to nvme-cli's
+dashboard (`scripts/dashboard/nvme-dashboard` of the checkout in
+`nvme_cli` of the config or `LAB_NVME_CLI`, default `~/nvme-cli`) and
+puts the site into DIR (default `~/.cache/nvme-lab/dashboard`): open
+`DIR/index.html` in a browser. The run is a record of the workflow
+"Boot tests", a section per nvme-cli version, a test per scenario
+(XFAIL as "failed as expected", XPASS as failed); a case that did not
+simply pass links its console, log, dracut log and state. The site is
+built on the CI host, which has Jinja2; its history and logs stay there,
+in `/root/scratch/lab-dashboard` (not removed by `lab boot teardown`), so
+every run adds to the last ones. `--dashboard-link TEXT=URL` puts a link
+on the page, e.g. to the dracut pull request tested.
+
+```
+lab boot test -j 8 --nvme master --nvme v216 \
+    --dracut-module ~/dracut/modules.d/74nvmf --skip-tag pre-os \
+    --dashboard --dashboard-link 'dracut #2820=https://github.com/dracut-ng/dracut/pull/2820'
+```
+
 #### nvme-cli versions
 
 dracut gets nvme-cli from the distribution, so a change to dracut's

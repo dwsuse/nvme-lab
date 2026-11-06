@@ -14,6 +14,9 @@ SCRATCH = '/root/scratch'
 # environment (LAB_TARGET_CONTROL, LAB_NVMF_FAILOVER).
 TARGET_CONTROL = '~/blktests/contrib/nvme-target-control/nvme-target-control'
 NVMF_FAILOVER = '~/nvmf-failover'
+# The nvme-cli checkout whose dashboard (scripts/dashboard) shows the
+# results of 'lab boot test --dashboard' (nvme_cli =, LAB_NVME_CLI)
+NVME_CLI = '~/nvme-cli'
 
 
 class ConfigError(Exception):
@@ -39,6 +42,7 @@ class Config:
     ssh_key: str | None = None
     target_control: str = str(Path(TARGET_CONTROL).expanduser())
     nvmf_failover: str = str(Path(NVMF_FAILOVER).expanduser())
+    nvme_cli: str = str(Path(NVME_CLI).expanduser())
 
     def host(self, name):
         """The host NAME; also accepts its address."""
@@ -95,7 +99,8 @@ def load(lab_file=None, user_file=None, env=None):
     for key, var, default in (('target_control', 'LAB_TARGET_CONTROL',
                                TARGET_CONTROL),
                               ('nvmf_failover', 'LAB_NVMF_FAILOVER',
-                               NVMF_FAILOVER)):
+                               NVMF_FAILOVER),
+                              ('nvme_cli', 'LAB_NVME_CLI', NVME_CLI)):
         value = env.get(var) or user.get(key) or default
         setattr(cfg, key, str(Path(value).expanduser()))
 

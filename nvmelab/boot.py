@@ -35,6 +35,7 @@ import io
 import queue
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import faults, nbft, remote, scenario, sync
@@ -410,10 +411,23 @@ def expected_duration(s):
             bool(s.boot.get('timeout')))
 
 
+@dataclass
+class Case:
+    """The result of a scenario with a tree."""
+    tree: Tree
+    scenario: object
+    name: str
+    result: str                 # PASS, FAIL, XFAIL, XPASS
+    bad: bool                   # counts as failed
+    errors: list = field(default_factory=list)
+    reason: str | None = None   # why it is expected to fail
+    duration: float = 0.0
+
+
 def test_one(cfg, host, s, tree, slot, name, out, **options):
     """Boot scenario S with TREE in SLOT as case NAME and write its
-    verdict to OUT. Returns the outcome and whether it counts as
-    failed."""
+    verdict to OUT. Returns the outcome, whether it counts as failed and
+    what was wrong."""
     env = read_env(cfg, host, slot)
     label = f' [{tree.label}]' if options.pop('show_tree', False) else ''
     print(f'--- {s.id}{label}: {s.name} (slot {slot.n})', file=out,
@@ -442,7 +456,7 @@ def test_one(cfg, host, s, tree, slot, name, out, **options):
               f'{scenario.xfail_reason(s, tree.version)}', file=out)
     for e in errors:
         print(f'    {e}', file=out)
-    return result, bad
+    return result, bad, errors
 
 
 def test(cfg, host, scenarios, prefix='t', module=None, trees=(),
@@ -451,8 +465,8 @@ def test(cfg, host, scenarios, prefix='t', module=None, trees=(),
     package with PACKAGE, else what is installed), JOBS at a time, each
     in a free slot; print a verdict for each. A scenario for another
     nvme-cli major version than a tree's is left out for it. The trees
-    are built first, once each. Returns the number of scenarios that
-    failed."""
+    are built first, once each. Returns the Cases, in the order of the
+    trees and scenarios."""
     available = existing_slots(cfg, host)
     if not available:
         raise ConfigError("no slot: run 'lab boot setup' first")
@@ -513,41 +527,43 @@ def test(cfg, host, scenarios, prefix='t', module=None, trees=(),
             print(f'FAIL {s.id} [{tree.label}]\n    the build failed',
                   file=stream)
             emit(out)
-            return tree, s.id, ('FAIL', True)
+            return Case(tree, s, name, 'FAIL', True, ['the build failed'])
         slot = free.get()
+        start = time.monotonic()
         try:
-            result = test_one(cfg, host, s, tree, slot, name, stream,
-                              **dict(options))
+            result, bad, errors = test_one(cfg, host, s, tree, slot, name,
+                                           stream, **dict(options))
         except ConfigError as e:
             print(f'FAIL {s.id}\n    {e}', file=stream)
-            result = ('FAIL', True)
+            result, bad, errors = 'FAIL', True, [str(e)]
         finally:
             free.put(slot)
         emit(out)
-        return tree, s.id, result
+        return Case(tree, s, name, result, bad, errors,
+                    scenario.xfail_reason(s, tree.version),
+                    time.monotonic() - start)
 
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         results = list(pool.map(one, cases))
+    order = {(t.label, s.id): i for i, (t, s) in
+             enumerate((t, s) for t in infos for s in scenarios)}
+    results.sort(key=lambda c: order[(c.tree.label, c.scenario.id)])
 
     def summary(rows):
-        counts, failed = {}, []
-        for _, sid, (result, bad) in rows:
-            counts[result] = counts.get(result, 0) + 1
-            if bad:
-                failed.append(sid)
+        counts = {}
+        for c in rows:
+            counts[c.result] = counts.get(c.result, 0) + 1
+        failed = [c.scenario.id for c in rows if c.bad]
         text = ', '.join(f'{n} {r}' for r, n in sorted(counts.items()))
-        return (f"{len(rows)} scenarios: {text}"
-                f"{'; failed: ' + ' '.join(failed) if failed else ''}",
-                len(failed))
+        return (f'{len(rows)} scenarios: {text}'
+                f"{'; failed: ' + ' '.join(failed) if failed else ''}")
 
-    total = 0
     for t in infos:
-        line, n = summary([r for r in results if r[0] is t])
-        total += n
+        line = summary([c for c in results if c.tree is t])
         print(f'{t.label}: {line}' if many else line)
     if many:
-        print(summary(results)[0])
-    return total
+        print(summary(results))
+    return results
 
 
 def teardown(cfg, host, target_host):
