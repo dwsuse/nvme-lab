@@ -1,0 +1,12 @@
+# Two subsystems on the command line: the initrd connects both, the root
+# is on one of them.
+name = "rd.nvmf.discover= of two subsystems"
+tags = ["cmdline"]
+
+[boot]
+source = "cmdline"
+append = ["rd.nvmf.discover=tcp,{traddr},,{extra}"]
+
+[expect]
+result = "pass"
+controllers = ["root", "extra"]

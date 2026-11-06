@@ -1,0 +1,11 @@
+# A second SSNS with the Non-bootable Entry Flag: an administrative
+# namespace the OS may need, connected too.
+name = "NBFT boot, a non-bootable second subsystem"
+tags = ["nbft"]
+
+[boot]
+nbft_ssns = ["extra,nonboot"]
+
+[expect]
+result = "pass"
+controllers = ["root", "extra"]

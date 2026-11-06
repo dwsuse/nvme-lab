@@ -1,0 +1,12 @@
+# No SSNS for the root, only a discovery descriptor: the root is found
+# through the discovery controller.
+name = "NBFT boot through a discovery descriptor"
+tags = ["nbft"]
+
+[boot]
+nbft_no_root = true
+nbft_discovery = ["{trsvcid}"]
+
+[expect]
+result = "pass"
+controllers = ["root"]

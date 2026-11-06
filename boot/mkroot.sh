@@ -4,8 +4,13 @@
 #   mkroot.sh TRADDR TRSVCID NQN UUID
 #
 # An ext4 file system with the given UUID, busybox, an os-release (systemd
-# switches only into a root that has one) and an /init that prints
-# "LAB-BOOT-ROOT-OK <kernel command line>" and powers the guest off.
+# switches only into a root that has one) and an /init that reports what
+# the initrd handed over and powers the guest off. Its report, between
+# LAB-BOOT-STATE-BEGIN and LAB-BOOT-STATE-END, has one line per NVMe
+# controller, "ctrl NAME TRANSPORT SUBSYSNQN", and one per entry of the
+# nvme-cli registry (/run moves along at switch_root), "registry NAME
+# owner=OWNER" (empty: unowned). Then it prints "LAB-BOOT-ROOT-OK <kernel
+# command line>".
 set -eu
 
 [ $# -eq 4 ] || { echo "usage: $0 TRADDR TRSVCID NQN UUID" >&2; exit 2; }
@@ -34,16 +39,29 @@ fi
 mkfs.ext4 -q -F -L lab-boot-root -U "$UUID" "/dev/$BLK"
 mkdir -p "$MNT"
 mount "/dev/$BLK" "$MNT"
-mkdir -p "$MNT/bin" "$MNT/proc" "$MNT/sys" "$MNT/dev" "$MNT/etc" \
-    "$MNT/usr/lib"
+# systemd moves /dev, /proc, /sys and /run to the new root only if their
+# mount points exist.
+mkdir -p "$MNT/bin" "$MNT/proc" "$MNT/sys" "$MNT/dev" "$MNT/run" \
+    "$MNT/etc" "$MNT/usr/lib"
 printf 'NAME=lab-boot-root\nID=lab-boot-root\n' > "$MNT/usr/lib/os-release"
 ln -sf ../usr/lib/os-release "$MNT/etc/os-release"
 cp /usr/bin/busybox-static "$MNT/bin/busybox"
 ln -sf busybox "$MNT/bin/sh"
 cat > "$MNT/init" <<'EOF'
 #!/bin/sh
-/bin/busybox mount -t proc proc /proc
-echo "LAB-BOOT-ROOT-OK $(/bin/busybox cat /proc/cmdline)"
+B=/bin/busybox
+$B mount -t proc proc /proc
+echo LAB-BOOT-STATE-BEGIN
+for c in /sys/class/nvme/nvme*; do
+    [ -e "$c" ] || continue
+    echo "ctrl ${c##*/} $($B cat "$c/transport") $($B cat "$c/subsysnqn")"
+done
+for e in /run/nvme/registry/*; do
+    [ -d "$e" ] || continue
+    echo "registry ${e##*/} owner=$($B cat "$e/owner" 2>/dev/null)"
+done
+echo LAB-BOOT-STATE-END
+echo "LAB-BOOT-ROOT-OK $($B cat /proc/cmdline)"
 echo o > /proc/sysrq-trigger
 /bin/busybox sleep 30
 EOF

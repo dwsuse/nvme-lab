@@ -1,0 +1,12 @@
+# The target in the host's /etc/nvme/discovery.conf (nvme-cli 2; nvme-cli
+# 3 converts it), carried by a hostonly initrd.
+name = "discovery.conf in a hostonly initrd"
+tags = ["legacy"]
+
+[boot]
+source = "legacy"
+hostonly = true
+
+[expect]
+result = "pass"
+controllers = ["root"]

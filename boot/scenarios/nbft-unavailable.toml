@@ -1,0 +1,11 @@
+# An SSNS the firmware marked unavailable (UNFLAG): libnvme tries it,
+# and its failure does not fail the boot.
+name = "NBFT boot, an unavailable namespace"
+tags = ["nbft"]
+
+[boot]
+nbft_ssns = ["4499/nqn.2026-11.io.lab:gone,unavailable"]
+
+[expect]
+result = "pass"
+controllers = ["root"]

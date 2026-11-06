@@ -12,8 +12,9 @@ import os
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 
-from . import boot, ci, config, inventory, parity, remote, sync
+from . import boot, ci, config, inventory, parity, remote, scenario, sync
 from .config import SCRATCH, ConfigError
 
 
@@ -99,21 +100,83 @@ def cmd_boot_setup(cfg, args):
     return 0
 
 
+def nbft_options(args):
+    """nbft_table()'s options of 'lab boot run' or 'lab boot nbft', or
+    None when the case has no NBFT."""
+    if not (args.nbft or args.nbft_ssns or args.nbft_discovery
+            or args.nbft_no_root):
+        return None
+    return dict(root=not args.nbft_no_root, ssns=args.nbft_ssns,
+                discovery=args.nbft_discovery)
+
+
 def cmd_boot_run(cfg, args):
     host = cfg.host(args.host) if args.host else cfg.ci_host()
+    nbft = nbft_options(args)
+    # With an NBFT, the initrd learns the target from it.
+    source = args.source or ('none' if nbft is not None else 'cmdline')
     options = dict(tree=args.nvme, package=args.nvme_package,
-                   source=args.source, hostonly=args.hostonly,
+                   source=source, hostonly=args.hostonly,
                    append=' '.join(args.append) or None,
                    timeout=args.timeout)
     if args.dry_run:
+        if nbft is not None:
+            # check it
+            boot.nbft_table(('192.0.2.1', '4420'), extra='4421', **nbft)
         argv = boot.run_argv(args.name, ('TRADDR', 'TRSVCID'),
                              module=args.dracut_module and
                              f'{boot.CONTAINER_DIR}/modules/{args.name}',
+                             nbft_file=nbft is not None and
+                             boot.nbft_path(args.name)[1],
                              **options)
         print(shlex.join(remote.ssh_argv(cfg, host, argv)))
         return 0
     return boot.run(cfg, host, args.name, module=args.dracut_module,
-                    **options)
+                    nbft_options=nbft, **options)
+
+
+def cmd_boot_test(cfg, args):
+    scenarios = scenario.find(args.scenario, args.tag)
+    if not scenarios:
+        raise ConfigError('no scenario selected')
+    if args.list:
+        for s in scenarios:
+            print(f"{s.id:24} {s.name} [{', '.join(s.tags)}]")
+        return 0
+    host = cfg.host(args.host) if args.host else cfg.ci_host()
+    failed = boot.test(cfg, host, scenarios, prefix=args.prefix,
+                       module=args.dracut_module, tree=args.nvme,
+                       package=args.nvme_package)
+    return 1 if failed else 0
+
+
+def cmd_boot_nbft(cfg, args):
+    if args.target_addr:
+        target, extra = tuple(args.target_addr.rsplit(':', 1)), None
+        if len(target) != 2 or not target[1].isdigit():
+            raise ConfigError(f"bad --target-addr '{args.target_addr}': "
+                              'TRADDR:TRSVCID')
+    else:
+        host = cfg.host(args.host) if args.host else cfg.ci_host()
+        target, extra = boot.read_env(cfg, host)
+    data = boot.nbft_table(target, extra=extra, **nbft_options(args))
+    Path(args.file).write_bytes(data)
+    print(f'{args.file}: NBFT, {len(data)} bytes')
+    return 0
+
+
+def add_nbft_arguments(b):
+    b.add_argument('--nbft-ssns', action='append', default=[],
+                   metavar='SPEC', help='one more SSNS descriptor: '
+                   '[TRADDR:]TRSVCID/NQN[,FLAG...] or extra[,FLAG...] (the '
+                   "extra subsystem of setup; TRADDR: the target's; FLAG: "
+                   'nonboot, discovered, separate-dc, available, '
+                   'unavailable)')
+    b.add_argument('--nbft-discovery', action='append', default=[],
+                   metavar='[TRADDR:]TRSVCID',
+                   help='a discovery descriptor')
+    b.add_argument('--nbft-no-root', action='store_true',
+                   help='no SSNS descriptor for the root subsystem')
 
 
 def cmd_boot_teardown(cfg, args):
@@ -230,19 +293,55 @@ def parser():
                       help="reinstall the distribution's nvme-cli")
     b.add_argument('--dracut-module', metavar='DIR', help="a local "
                    "directory to use as dracut's 74nvmf module")
-    b.add_argument('--source', default='cmdline', choices=boot.SOURCES,
+    b.add_argument('--source', choices=boot.SOURCES,
                    help='where the initrd learns the target: cmdline: '
-                   'rd.nvmf.discover=; static: nvme-fabrics.conf; legacy: '
-                   'discovery.conf; none: give it with --append')
+                   'rd.nvmf.discover= (the default); static: '
+                   'nvme-fabrics.conf; legacy: discovery.conf; none: from '
+                   'the NBFT (the default with one) or --append')
     b.add_argument('--hostonly', action='store_true',
                    help='a hostonly initrd (needed by static and legacy)')
     b.add_argument('--append', nargs='*', default=[], metavar='ARG',
                    help='more kernel command line')
     b.add_argument('--timeout', type=int, help='seconds for the boot '
                    '(default: 240)')
+    b.add_argument('--nbft', action='store_true',
+                   help="give the guest an NBFT: the guest's NIC, the root "
+                   'subsystem (implied by the other --nbft options)')
+    add_nbft_arguments(b)
     b.add_argument('--dry-run', action='store_true',
                    help='print the ssh command, run nothing')
     b.set_defaults(fn=cmd_boot_run)
+    b = bsub.add_parser('test', help='run boot scenarios and check what '
+                        'the root sees',
+                        description=scenario.__doc__,
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
+    b.add_argument('scenario', nargs='*', help='scenario names (files in '
+                   'boot/scenarios without .toml) or paths (default: all)')
+    b.add_argument('--tag', action='append', default=[],
+                   help='only the scenarios with this tag (repeatable)')
+    b.add_argument('--prefix', default='t', help='the cases are named '
+                   'PREFIX-SCENARIO (default: t)')
+    b.add_argument('--host', help='default: the host with ci = true')
+    nvme = b.add_mutually_exclusive_group()
+    nvme.add_argument('--nvme', metavar='TREE', help='build and install '
+                      f'the nvme-cli tree {SCRATCH}/TREE (lab sync)')
+    nvme.add_argument('--nvme-package', action='store_true',
+                      help="reinstall the distribution's nvme-cli")
+    b.add_argument('--dracut-module', metavar='DIR', help="a local "
+                   "directory to use as dracut's 74nvmf module")
+    b.add_argument('--list', action='store_true',
+                   help='list the selected scenarios, run nothing')
+    b.set_defaults(fn=cmd_boot_test)
+    b = bsub.add_parser('nbft', help="write the NBFT of 'lab boot run "
+                        "--nbft' to a file")
+    b.add_argument('file', help="the table, e.g. for 'nvme nbft show "
+                   "--nbft-path DIR' (name it NBFT)")
+    b.add_argument('--host', help='default: the host with ci = true')
+    b.add_argument('--target-addr', metavar='TRADDR:TRSVCID',
+                   help='the root subsystem (default: the one of '
+                   "'lab boot setup')")
+    add_nbft_arguments(b)
+    b.set_defaults(fn=cmd_boot_nbft, nbft=True)
     b = bsub.add_parser('teardown', help='remove the container, the '
                         'subsystem and the results')
     b.add_argument('--host', help='default: the host with ci = true')

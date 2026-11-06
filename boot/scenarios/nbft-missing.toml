@@ -1,0 +1,11 @@
+# An SSNS whose target is not there, without the unavailable flag: an
+# error in the log, the boot goes on with the root.
+name = "NBFT boot, a missing subsystem"
+tags = ["nbft"]
+
+[boot]
+nbft_ssns = ["4499/nqn.2026-11.io.lab:gone"]
+
+[expect]
+result = "pass"
+controllers = ["root"]

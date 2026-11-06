@@ -1,0 +1,11 @@
+# The firmware's NBFT has the root subsystem: the network (HFI) and the
+# target (SSNS) come from it, nothing on the command line.
+name = "NBFT boot"
+tags = ["nbft"]
+
+[boot]
+nbft = true
+
+[expect]
+result = "pass"
+controllers = ["root"]

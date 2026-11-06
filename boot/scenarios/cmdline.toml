@@ -1,0 +1,11 @@
+# The target on the kernel command line, the host identity too (no
+# hostonly initrd).
+name = "rd.nvmf.discover= on the command line"
+tags = ["cmdline"]
+
+[boot]
+source = "cmdline"
+
+[expect]
+result = "pass"
+controllers = ["root"]

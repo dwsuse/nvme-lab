@@ -1,0 +1,12 @@
+# nvme-cli 3: the target in the host's /etc/nvme/nvme-fabrics.conf,
+# carried by a hostonly initrd.
+name = "nvme-fabrics.conf in a hostonly initrd"
+tags = ["static", "nvme-cli-3"]
+
+[boot]
+source = "static"
+hostonly = true
+
+[expect]
+result = "pass"
+controllers = ["root"]

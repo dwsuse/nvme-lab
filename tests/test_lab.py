@@ -3,6 +3,7 @@
 import contextlib
 import io
 import shlex
+import struct
 import subprocess
 import sys
 import tempfile
@@ -12,7 +13,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from nvmelab import boot, ci, cli, config, inventory, parity, remote, sync  # noqa: E402,E501
+from nvmelab import boot, ci, cli, config, inventory, nbft, parity, remote, scenario, sync  # noqa: E402,E501
 from nvmelab.config import ConfigError  # noqa: E402
 
 LAB = """
@@ -283,11 +284,25 @@ class BootTest(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, 'no trsvcid'):
             boot.parse_trsvcid('error: no such host\n')
 
-    def test_parse_target(self):
-        self.assertEqual(boot.parse_target('TRADDR=192.0.2.30\n'
-                                           'TRSVCID=4421\n'), self.TARGET)
+    def test_parse_env(self):
+        self.assertEqual(boot.parse_env('TRADDR=192.0.2.30\n'
+                                        'TRSVCID=4421\n'),
+                         (self.TARGET, None))
+        self.assertEqual(boot.parse_env('TRADDR=192.0.2.30\nTRSVCID=4421\n'
+                                        'EXTRA_TRSVCID=4422\n'),
+                         (self.TARGET, '4422'))
         with self.assertRaisesRegex(ConfigError, 'lab boot setup'):
-            boot.parse_target('')
+            boot.parse_env('')
+
+    def test_nbft_table_extra(self):
+        t = NbftTest.decode(boot.nbft_table(
+            self.TARGET, ssns=['extra,nonboot', 'extra'], extra='4422'))
+        self.assertEqual([(s['trsvcid'], s['nqn'], s['flags'])
+                          for s in t['ssns'][1:]],
+                         [('4422', boot.EXTRA_NQN, 0x3),
+                          ('4422', boot.EXTRA_NQN, 0x1)])
+        with self.assertRaisesRegex(ConfigError, 'setup.*again'):
+            boot.nbft_table(self.TARGET, ssns=['extra'])
 
     def test_run_argv(self):
         argv = boot.run_argv('c1', self.TARGET, tree='wt-1',
@@ -326,6 +341,44 @@ class BootTest(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, 'bad scratch name'):
             boot.run_argv('c1', self.TARGET, tree='../t')
 
+    def test_run_argv_nbft(self):
+        opts = boot.run_argv('c1', self.TARGET, source='none',
+                             nbft_file='/scratch/lab-boot/nbft/c1')[5:]
+        self.assertEqual(opts[opts.index('--nbft') + 1],
+                         '/scratch/lab-boot/nbft/c1')
+        self.assertNotIn('--nbft', boot.run_argv('c1', self.TARGET))
+
+    def test_nbft_table(self):
+        t = NbftTest.decode(boot.nbft_table(
+            self.TARGET, ssns=['4422/nqn.x:extra,nonboot,unavailable',
+                               '192.0.2.31:4423/nqn.x:other'],
+            discovery=['4420', '192.0.2.32:8009']))
+        self.assertEqual(t['host_nqn'], boot.HOST_NQN)
+        self.assertEqual(t['host_id'], boot.HOST_ID)
+        hfi, = t['hfis']
+        self.assertEqual((hfi['mac'], hfi['ipaddr'], hfi['prefix'],
+                          hfi['gateway']),
+                         (boot.GUEST_MAC, boot.GUEST_IP, boot.GUEST_PREFIX,
+                          boot.GUEST_GATEWAY))
+        self.assertEqual(hfi['pci_sbdf'], boot.GUEST_PCI_DEV << 3)
+        self.assertEqual([(s['traddr'], s['trsvcid'], s['nqn'], s['flags'])
+                          for s in t['ssns']],
+                         [('192.0.2.30', '4421', boot.ROOT_NQN, 0x1),
+                          ('192.0.2.30', '4422', 'nqn.x:extra', 0x103),
+                          ('192.0.2.31', '4423', 'nqn.x:other', 0x1)])
+        self.assertEqual([d['uri'] for d in t['discovery']],
+                         ['nvme+tcp://192.0.2.30:4420/',
+                          'nvme+tcp://192.0.2.32:8009/'])
+
+    def test_nbft_table_no_root(self):
+        t = NbftTest.decode(boot.nbft_table(self.TARGET, root=False,
+                                            discovery=['4421']))
+        self.assertEqual(t['ssns'], [])
+        with self.assertRaisesRegex(ConfigError, 'points at nothing'):
+            boot.nbft_table(self.TARGET, root=False)
+        with self.assertRaisesRegex(ConfigError, 'bad --nbft-discovery'):
+            boot.nbft_table(self.TARGET, discovery=['x'])
+
     def test_upload_argv(self):
         cfg = config.Config(hosts={}, ssh_key=None)
         host = config.Host('a', 'a.lan')
@@ -337,6 +390,238 @@ class BootTest(unittest.TestCase):
     def test_scripts_exist(self):
         for script in ('container.sh', 'mkroot.sh', 'boot.sh'):
             self.assertTrue((boot.SCRIPTS / script).is_file(), script)
+
+
+class NbftTest(unittest.TestCase):
+    """The table is checked by decoding it here, along the lines of
+    libnvme's nbft.c (and on the lab with 'nvme nbft show')."""
+
+    @staticmethod
+    def decode(b):
+        def ref(off):
+            return struct.unpack_from('<IH', b, off)
+
+        def string(off):
+            o, n = ref(off)
+            assert b[o + n] == 0, 'string not terminated'
+            return b[o:o + n].decode() if n else None
+
+        def ip(off):
+            o, n = ref(off)
+            assert n == 16
+            return str(nbft.ipaddress.ip_address(b[o:o + 16]).ipv4_mapped
+                       or nbft.ipaddress.ip_address(b[o:o + 16]))
+
+        def ip_at(off):
+            a = nbft.ipaddress.ip_address(b[off:off + 16])
+            return str(a.ipv4_mapped or a)
+
+        assert sum(b) & 0xff == 0, 'bad checksum'
+        sig, length, major = struct.unpack_from('<4sIB', b, 0)
+        assert (sig, length, major) == (b'NBFT', len(b), 1)
+        heap_off, heap_len = struct.unpack_from('<II', b, 36)
+        assert heap_off + heap_len == len(b)
+        c = struct.unpack_from(nbft.CONTROL, b, 64)
+        assert c[0] == nbft.DESC_CONTROL and c[5] & 1
+        host = b[c[7]:c[7] + 32]
+        assert host[0] == nbft.DESC_HOST and host[1] & 1
+        t = dict(host_id=str(nbft.uuid.UUID(bytes=host[2:18])),
+                 host_nqn=string(c[7] + 18), hfis=[], ssns=[], discovery=[])
+        hfio, hfil, _, nhfi = c[11:15]
+        for i in range(nhfi):
+            h = b[hfio + i * hfil:hfio + (i + 1) * hfil]
+            assert h[0] == nbft.DESC_HFI and h[1] == i + 1 and h[3] == 3
+            to, tl = ref(hfio + i * hfil + 16)
+            assert tl == 128 and b[to] == nbft.DESC_HFI_TRINFO
+            tcp = struct.unpack_from(nbft.HFI_TCP, b, to)
+            t['hfis'].append(dict(
+                flags=tcp[5], pci_sbdf=tcp[6],
+                mac=':'.join(f'{x:02x}' for x in tcp[7]),
+                ipaddr=ip_at(to + 20), prefix=tcp[11],
+                gateway=ip_at(to + 37)))
+        so, sl, _, ns = c[15:19]
+        for i in range(ns):
+            o = so + i * sl
+            s = struct.unpack_from(nbft.SSNS, b, o)
+            assert s[0] == nbft.DESC_SSNS and s[1] == i + 1
+            t['ssns'].append(dict(
+                flags=s[2], traddr=ip(o + 10), trsvcid=string(o + 16),
+                nsid=s[12], hfi=s[16], discovery=s[5],
+                nqn=string(o + 54)))
+        do, dl, _, nd = c[23:27]
+        for i in range(nd):
+            o = do + i * dl
+            assert b[o] == nbft.DESC_DISCOVERY and b[o + 2] == i + 1
+            t['discovery'].append(dict(uri=string(o + 6),
+                                       nqn=string(o + 12), hfi=b[o + 3]))
+        return t
+
+    def table(self, **kwargs):
+        hfi = nbft.Hfi(mac='52:54:00:aa:bb:cc', ipaddr='192.0.2.15',
+                       prefix=24, gateway='192.0.2.1')
+        return nbft.Table(host_nqn='nqn.2014-08.org.nvmexpress:uuid:x',
+                          host_id='6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d',
+                          hfis=[hfi], **kwargs)
+
+    def test_sizes(self):
+        for fmt, size in nbft.SIZES.items():
+            self.assertEqual(struct.calcsize(fmt), size, fmt)
+
+    def test_build(self):
+        t = self.table(
+            ssns=[nbft.Ssns('192.0.2.30', '4421', 'nqn.x:root'),
+                  nbft.Ssns('2001:db8::30', '4422', 'nqn.x:v6', nsid=7,
+                            flags=('nonboot', 'unavailable'),
+                            discovery=1)],
+            discovery=[nbft.Discovery('nvme+tcp://192.0.2.30:8009/')])
+        d = self.decode(nbft.build(t))
+        self.assertEqual(d['host_id'], '6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d')
+        self.assertEqual(d['host_nqn'], 'nqn.2014-08.org.nvmexpress:uuid:x')
+        self.assertEqual(d['hfis'], [dict(
+            flags=nbft.HFI_TCP_VALID | nbft.HFI_TCP_GLOBAL_ROUTE,
+            pci_sbdf=0, mac='52:54:00:aa:bb:cc', ipaddr='192.0.2.15',
+            prefix=24, gateway='192.0.2.1')])
+        self.assertEqual(d['ssns'], [
+            dict(flags=0x1, traddr='192.0.2.30', trsvcid='4421', nsid=1,
+                 hfi=1, discovery=0, nqn='nqn.x:root'),
+            dict(flags=0x103, traddr='2001:db8::30', trsvcid='4422', nsid=7,
+                 hfi=1, discovery=1, nqn='nqn.x:v6')])
+        self.assertEqual(d['discovery'], [dict(
+            uri='nvme+tcp://192.0.2.30:8009/', nqn=nbft.DISCOVERY_NQN,
+            hfi=1)])
+
+    def test_build_dhcp(self):
+        t = self.table(ssns=[nbft.Ssns('192.0.2.30', '4421', 'nqn.x:r')])
+        t.hfis[0].dhcp_server = '192.0.2.1'
+        flags = self.decode(nbft.build(t))['hfis'][0]['flags']
+        self.assertTrue(flags & nbft.HFI_TCP_DHCP_OVERRIDE)
+
+    def test_build_checks(self):
+        for kwargs, msg in (
+                (dict(ssns=[nbft.Ssns('192.0.2.30', '1', 'n', hfi=2)]),
+                 'no HFI 2'),
+                (dict(ssns=[nbft.Ssns('192.0.2.30', '1', 'n',
+                                      discovery=1)]),
+                 'no discovery descriptor 1'),
+                (dict(ssns=[nbft.Ssns('192.0.2.30', '1', 'n',
+                                      flags=('bogus',))]),
+                 "bad SSNS flag 'bogus'"),
+                (dict(ssns=[nbft.Ssns('192.0.2.30', '1', 'n',
+                                      flags=('available', 'unavailable'))]),
+                 'exclude each other'),
+                (dict(ssns=[nbft.Ssns('nope', '1', 'n')]),
+                 'bad IP address')):
+            with self.subTest(msg=msg):
+                with self.assertRaisesRegex(nbft.NbftError, msg):
+                    nbft.build(self.table(**kwargs))
+        t = self.table()
+        t.hfis[0].mac = '52:54:00'
+        with self.assertRaisesRegex(nbft.NbftError, 'bad MAC'):
+            nbft.build(t)
+        t = self.table()
+        t.hfis = []
+        with self.assertRaisesRegex(nbft.NbftError, 'needs an HFI'):
+            nbft.build(t)
+
+    def test_parse_ssns_spec(self):
+        s = nbft.parse_ssns_spec('4422/nqn.x:a,nonboot', '192.0.2.30')
+        self.assertEqual((s.traddr, s.trsvcid, s.nqn, s.flags),
+                         ('192.0.2.30', '4422', 'nqn.x:a', ('nonboot',)))
+        s = nbft.parse_ssns_spec('192.0.2.31:4423/nqn.x:b', '192.0.2.30')
+        self.assertEqual((s.traddr, s.trsvcid), ('192.0.2.31', '4423'))
+        for bad in ('nqn.x', '4422/', 'x/nqn.x', '4422/nqn.x,bogus'):
+            with self.subTest(spec=bad):
+                with self.assertRaises(nbft.NbftError):
+                    nbft.parse_ssns_spec(bad, '192.0.2.30')
+
+
+class ScenarioTest(unittest.TestCase):
+    TARGET = ('192.0.2.30', '4421')
+    ROLES = {boot.ROOT_NQN: 'root', boot.EXTRA_NQN: 'extra'}
+
+    def write(self, text):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        p = Path(self.tmp.name) / 'case.toml'
+        p.write_text(text, encoding='utf-8')
+        return p
+
+    def test_shipped_scenarios(self):
+        scenarios = scenario.find()
+        self.assertTrue(scenarios)
+        for s in scenarios:
+            with self.subTest(scenario=s.id):
+                opts = scenario.run_options(s, self.TARGET, '4422')
+                argv = boot.run_argv(
+                    s.id, self.TARGET, source=opts['source'],
+                    hostonly=opts['hostonly'], append=opts['append'])
+                self.assertIn('--source', argv)
+                if opts['nbft_options'] is not None:
+                    NbftTest.decode(boot.nbft_table(
+                        self.TARGET, extra='4422', **opts['nbft_options']))
+
+    def test_find_tags(self):
+        ids = {s.id for s in scenario.find(tags=['nbft'])}
+        self.assertIn('nbft', ids)
+        self.assertNotIn('cmdline', ids)
+
+    def test_load_errors(self):
+        for text, msg in (('bogus = 1\n', "unknown key 'bogus'"),
+                          ('[boot]\nsorce = "x"\n', "unknown key 'sorce'"),
+                          ('[boot]\nhostonly = "yes"\n', 'must be a bool'),
+                          ('[expect]\nresult = "maybe"\n', 'pass or fail'),
+                          ('name = \n', 'case.toml')):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(ConfigError, msg):
+                    scenario.load(self.write(text))
+
+    def test_run_options(self):
+        s = scenario.load(self.write(
+            '[boot]\nnbft_ssns = ["extra,nonboot", "{extra}/nqn.x"]\n'
+            'nbft_discovery = ["{trsvcid}"]\n'
+            'append = ["rd.nvmf.discover=tcp,{traddr},,{extra}"]\n'))
+        opts = scenario.run_options(s, self.TARGET, '4422')
+        self.assertEqual(opts['source'], 'none')
+        self.assertEqual(opts['append'],
+                         'rd.nvmf.discover=tcp,192.0.2.30,,4422')
+        self.assertEqual(opts['nbft_options'],
+                         dict(root=True, ssns=['extra,nonboot', '4422/nqn.x'],
+                              discovery=['4421']))
+        with self.assertRaisesRegex(ConfigError, 'setup.*again'):
+            scenario.run_options(s, self.TARGET, None)
+        s = scenario.load(self.write('[boot]\nappend = ["{nope}"]\n'))
+        with self.assertRaisesRegex(ConfigError, 'unknown placeholder'):
+            scenario.run_options(s, self.TARGET, '4422')
+        s = scenario.load(self.write('name = "x"\n'))
+        opts = scenario.run_options(s, self.TARGET, '4422')
+        self.assertEqual((opts['source'], opts['append'],
+                          opts['nbft_options']), ('cmdline', None, None))
+
+    def test_parse_state(self):
+        state = scenario.parse_state(
+            f'ctrl nvme0 tcp {boot.ROOT_NQN}\n'
+            f'ctrl nvme1 tcp {boot.EXTRA_NQN}\n'
+            'registry nvme0 owner=pre-os\nregistry nvme1 owner=\n')
+        self.assertEqual(state, {'nvme0': (boot.ROOT_NQN, 'pre-os'),
+                                 'nvme1': (boot.EXTRA_NQN, None)})
+
+    def test_verdict(self):
+        s = scenario.load(self.write(
+            '[expect]\ncontrollers = ["root", "extra"]\n'
+            'owners = { root = "pre-os", extra = "" }\n'))
+        good = {'nvme0': (boot.ROOT_NQN, 'pre-os'),
+                'nvme1': (boot.EXTRA_NQN, None)}
+        self.assertEqual(scenario.verdict(s, True, good, self.ROLES), [])
+        self.assertEqual(scenario.verdict(s, False, {}, self.ROLES),
+                         ['boot failed, expected pass'])
+        bad = {'nvme0': (boot.ROOT_NQN, 'nbft')}
+        self.assertEqual(scenario.verdict(s, True, bad, self.ROLES), [
+            "controllers of ['root'], expected ['extra', 'root']",
+            "root nvme0: owner 'nbft', expected 'pre-os'"])
+        s = scenario.load(self.write('[expect]\nresult = "fail"\n'))
+        self.assertEqual(scenario.verdict(s, False, {}, self.ROLES), [])
+        self.assertEqual(scenario.verdict(s, True, good, self.ROLES),
+                         ['boot passed, expected fail'])
 
 
 class CliTest(unittest.TestCase):
@@ -380,6 +665,55 @@ class CliTest(unittest.TestCase):
         self.assertEqual(inner[inner.index('--dracut-module') + 1],
                          '/scratch/lab-boot/modules/c1')
         self.assertEqual(inner[inner.index('--nvme-tree') + 1], '/scratch/wt')
+
+    def test_boot_run_nbft_dry_run(self):
+        rc, out, _ = self.run_cli('boot', 'run', 'c1', '--nbft-ssns',
+                                  '4422/nqn.x:extra,nonboot', '--dry-run')
+        self.assertEqual(rc, 0)
+        inner = shlex.split(shlex.split(out)[-1])
+        self.assertEqual(inner[inner.index('--nbft') + 1],
+                         '/scratch/lab-boot/nbft/c1')
+        # the target comes from the NBFT
+        self.assertEqual(inner[inner.index('--source') + 1], 'none')
+
+    def test_boot_run_nbft_with_source(self):
+        rc, out, _ = self.run_cli('boot', 'run', 'c1', '--nbft', '--source',
+                                  'cmdline', '--dry-run')
+        self.assertEqual(rc, 0)
+        inner = shlex.split(shlex.split(out)[-1])
+        self.assertEqual(inner[inner.index('--source') + 1], 'cmdline')
+
+    def test_boot_run_nbft_bad_spec(self):
+        rc, _, err = self.run_cli('boot', 'run', 'c1', '--nbft-ssns',
+                                  '4422/nqn.x,bogus', '--dry-run')
+        self.assertEqual(rc, 2)
+        self.assertIn("bad SSNS flag 'bogus'", err)
+
+    def test_boot_nbft(self):
+        f = Path(self.tmp.name) / 'NBFT'
+        rc, out, _ = self.run_cli('boot', 'nbft', str(f), '--target-addr',
+                                  '192.0.2.30:4421', '--nbft-ssns',
+                                  '4422/nqn.x:extra')
+        self.assertEqual(rc, 0)
+        t = NbftTest.decode(f.read_bytes())
+        self.assertEqual([(s['traddr'], s['trsvcid'], s['nqn'])
+                          for s in t['ssns']],
+                         [('192.0.2.30', '4421', boot.ROOT_NQN),
+                          ('192.0.2.30', '4422', 'nqn.x:extra')])
+
+    def test_boot_nbft_bad_target(self):
+        rc, _, err = self.run_cli('boot', 'nbft', 'x', '--target-addr', 'y')
+        self.assertEqual(rc, 2)
+        self.assertIn('bad --target-addr', err)
+
+    def test_boot_test_list(self):
+        rc, out, _ = self.run_cli('boot', 'test', '--list', '--tag', 'nbft')
+        self.assertEqual(rc, 0)
+        self.assertIn('nbft-nonboot', out)
+        self.assertNotIn('static-hostonly', out)
+        rc, _, err = self.run_cli('boot', 'test', '--list', '--tag', 'nope')
+        self.assertEqual(rc, 2)
+        self.assertIn('no scenario selected', err)
 
     def test_boot_run_static_needs_hostonly(self):
         rc, _, err = self.run_cli('boot', 'run', 'c1', '--source', 'static',

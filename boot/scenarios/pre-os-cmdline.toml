@@ -1,0 +1,13 @@
+# dracut's pre-pivot hook (nvmf-registry-pre-os.sh, nvme-cli 3): the
+# controller of the root gets owner=pre-os, the other one stays unowned.
+name = "registry owners after a boot from the command line"
+tags = ["pre-os", "nvme-cli-3"]
+
+[boot]
+source = "cmdline"
+append = ["rd.nvmf.discover=tcp,{traddr},,{extra}"]
+
+[expect]
+result = "pass"
+controllers = ["root", "extra"]
+owners = { root = "pre-os", extra = "" }

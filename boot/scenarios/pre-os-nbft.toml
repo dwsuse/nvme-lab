@@ -1,0 +1,13 @@
+# dracut's pre-pivot hook with an NBFT: connect-all --nbft makes both
+# controllers owner=nbft; the root's becomes pre-os, the other one loses
+# its owner.
+name = "registry owners after an NBFT boot"
+tags = ["pre-os", "nbft", "nvme-cli-3"]
+
+[boot]
+nbft_ssns = ["extra,nonboot"]
+
+[expect]
+result = "pass"
+controllers = ["root", "extra"]
+owners = { root = "pre-os", extra = "" }

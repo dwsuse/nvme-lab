@@ -5,7 +5,7 @@
 #   boot.sh --name NAME --target TRADDR:TRSVCID --root-uuid UUID
 #           [--nvme-tree DIR | --nvme-package] [--dracut-module DIR]
 #           [--source cmdline|static|legacy|none] [--hostonly]
-#           [--append ARGS] [--timeout SECONDS]
+#           [--append ARGS] [--timeout SECONDS] [--nbft FILE]
 #
 # --nvme-tree      build the nvme-cli tree in DIR and install it
 #                  (default: keep the nvme that is installed)
@@ -20,14 +20,21 @@
 # --hostonly       a hostonly initrd: it carries the container's
 #                  /etc/nvme files. Otherwise the host identity goes on
 #                  the kernel command line (rd.nvmf.hostnqn/hostid).
+# --nbft           give the guest FILE as its NBFT ACPI table. Its HFI
+#                  must be the guest's NIC (GUEST_MAC, 10.0.2.15/24 via
+#                  10.0.2.2); the network setup comes from it, no ip=.
 #
 # Results in /scratch/lab-boot/out/NAME: log, dracut.log, lsinitrd.txt,
-# console.txt. Prints RESULT=PASS or RESULT=FAIL; exits 0 on PASS, 1 on
-# FAIL, 2 when the case could not be set up.
+# console.txt, state.txt (the NVMe controllers and nvme-cli registry
+# entries the root saw, see mkroot.sh) and NBFT. Prints RESULT=PASS and
+# the state, or RESULT=FAIL; exits 0 on PASS, 1 on FAIL, 2 when the case
+# could not be set up.
 set -u
 
 NAME='' TARGET='' UUID='' TREE='' PACKAGE='' MODULE='' HOSTONLY='' APPEND=''
-SOURCE=cmdline TIMEOUT=240
+SOURCE=cmdline TIMEOUT=240 NBFT=''
+# The guest's NIC; nvmelab/boot.py writes the same into the HFI of an NBFT.
+GUEST_MAC=52:54:00:12:34:56 GUEST_PCI_DEV=3
 usage() { sed -n '4,9p' "$0" >&2; exit 2; }
 while [ $# -gt 0 ]; do
     case $1 in
@@ -41,6 +48,7 @@ while [ $# -gt 0 ]; do
         --hostonly) HOSTONLY=1 ;;
         --append) APPEND=$2; shift ;;
         --timeout) TIMEOUT=$2; shift ;;
+        --nbft) NBFT=$2; shift ;;
         *) usage ;;
     esac
     shift
@@ -49,6 +57,10 @@ if [ -z "$NAME" ] || [ -z "$TARGET" ] || [ -z "$UUID" ]; then
     usage
 fi
 TRADDR=${TARGET%:*} TRSVCID=${TARGET##*:}
+if [ -n "$NBFT" ] && [ ! -f "$NBFT" ]; then
+    echo "no NBFT $NBFT" >&2
+    exit 2
+fi
 
 OUT=/scratch/lab-boot/out/$NAME
 rm -rf "$OUT"
@@ -86,7 +98,9 @@ rm -rf /etc/nvme/discovery.conf /etc/nvme/config.json \
 for KVER in /lib/modules/*; do KVER=${KVER##*/}; break; done
 CMDLINE="console=ttyS0 net.ifnames=0 root=UUID=$UUID rw init=/init panic=-1"
 CMDLINE="$CMDLINE rd.retry=10 rd.neednet=1"
-CMDLINE="$CMDLINE ip=10.0.2.15::10.0.2.2:255.255.255.0:guest:eth0:none"
+if [ -z "$NBFT" ]; then
+    CMDLINE="$CMDLINE ip=10.0.2.15::10.0.2.2:255.255.255.0:guest:eth0:none"
+fi
 case $SOURCE in
     cmdline)
         CMDLINE="$CMDLINE rd.nvmf.discover=tcp,$TRADDR,,$TRSVCID" ;;
@@ -116,14 +130,25 @@ dracut --force $HO --add "nvmf systemd-networkd" \
     || fail "dracut, see $OUT/dracut.log"
 lsinitrd "$OUT/initrd.img" > "$OUT/lsinitrd.txt" 2>&1
 
+if [ -n "$NBFT" ]; then
+    cp "$NBFT" "$OUT/NBFT"
+    set -- -acpitable "file=$NBFT"
+else
+    set --
+fi
 timeout "$TIMEOUT" qemu-system-x86_64 -enable-kvm -m 1024 -smp 2 \
     -nographic -no-reboot -kernel "/boot/vmlinuz-$KVER" \
     -initrd "$OUT/initrd.img" -append "$CMDLINE" \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-    > "$OUT/console.txt" 2>&1
+    -netdev user,id=n0 \
+    -device "virtio-net-pci,netdev=n0,mac=$GUEST_MAC,addr=$GUEST_PCI_DEV" \
+    "$@" > "$OUT/console.txt" 2>&1
 
+# The report of the root's /init (mkroot.sh), without the console's CRs
+sed -n '/LAB-BOOT-STATE-BEGIN/,/LAB-BOOT-STATE-END/p' "$OUT/console.txt" \
+    | tr -d '\r' | sed '/LAB-BOOT-STATE-/d' > "$OUT/state.txt"
 if grep -a -q LAB-BOOT-ROOT-OK "$OUT/console.txt"; then
     echo "RESULT=PASS $NAME"
+    cat "$OUT/state.txt"
     exit 0
 fi
 echo "RESULT=FAIL $NAME, see $OUT/console.txt"

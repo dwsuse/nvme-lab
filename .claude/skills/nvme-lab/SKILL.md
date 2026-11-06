@@ -1,6 +1,6 @@
 ---
 name: nvme-lab
-description: Run nvme-cli builds and tests on the lab VMs (nvme host, nvmet NVMe/TCP target, nvme-bsd FreeBSD) with the `lab` tool from ~/nvme-lab. Use for CI parity before pushing an nvme-cli PR (build.sh in the CI images), FreeBSD builds/tests, NVMe/TCP connect/DH-CHAP/TLS tests, blktests or nvmf-failover runs, anything that needs root or a real/emulated NVMe device, and for checking what is on the VMs.
+description: Run nvme-cli builds and tests on the lab VMs (nvme host, nvmet NVMe/TCP target, nvme-bsd FreeBSD) with the `lab` tool from ~/nvme-lab. Use for CI parity before pushing an nvme-cli PR (build.sh in the CI images), FreeBSD builds/tests, NVMe/TCP connect/DH-CHAP/TLS tests, booting a QEMU guest from NVMe/TCP through dracut (boot scenarios, NBFT boots with a generated NBFT table), blktests or nvmf-failover runs, anything that needs root or a real/emulated NVMe device, and for checking what is on the VMs.
 ---
 
 # nvme-lab
@@ -21,6 +21,9 @@ $L parity NAME [-C TREE] [-r REF] [-w] [--only JOB...] [--pull]
 $L ssh HOST [COMMAND...]                   # remote shell runs the words
 $L scratch HOST [--rm NAME...]             # list / remove scratch trees
 $L boot setup | run NAME [...] | teardown  # boot QEMU from an NVMe/TCP root
+$L boot test [SCENARIO...] [--tag T] [--nvme TREE] [--dracut-module DIR]
+                                           # boot scenarios with verdicts
+$L boot nbft FILE [--nbft-ssns ...]        # write the NBFT of a case
 ```
 
 - `sync` pushes HEAD (or `-r REF`) with git and checks it out detached:
@@ -51,11 +54,25 @@ $L boot setup | run NAME [...] | teardown  # boot QEMU from an NVMe/TCP root
   has no playwright Python package and no PyPI access.
 - FreeBSD: `lab sync nvme-bsd -n N`, then `meson setup .build && ninja
   -C .build && meson test -C .build` in `/root/scratch/N`.
-- dracut / boot from NVMe/TCP: `lab boot setup` once, then `lab boot run
-  NAME [--nvme TREE] [--dracut-module DIR] [--source
-  cmdline|static|legacy|none] [--hostonly]` per case (RESULT=PASS/FAIL,
-  results in /root/scratch/lab-boot/out/NAME), `lab boot teardown` at
-  the end. No NBFT (no firmware for it). Details: docs/testing.md.
+- dracut / boot from NVMe/TCP: `lab boot setup` once (container, the
+  `root` subsystem and an `extra` one for multi-subsystem cases), then
+  `lab boot test` for the scenarios of `boot/scenarios/*.toml` (each a
+  case plus expectations: boots or not, which subsystems have
+  controllers after switch-root, nvme-cli registry owners; PASS/FAIL per
+  scenario, exit 0 if all pass), or `lab boot run NAME [--nvme TREE]
+  [--dracut-module DIR] [--source cmdline|static|legacy|none]
+  [--hostonly]` for one case (RESULT=PASS/FAIL plus the root's report;
+  results in /root/scratch/lab-boot/out/NAME, the report in state.txt).
+  `lab boot teardown` at the end; it removes earlier results too, ask
+  first. A new test case is a new scenario file, not a hand-made run.
+- NBFT boots: `lab boot run NAME --nbft` gives the guest an NBFT that lab
+  generates (nvmelab/nbft.py; QEMU `-acpitable`): HFI = the guest NIC,
+  SSNS = the root. More: `--nbft-ssns [TRADDR:]PORT/NQN[,FLAG...]` or
+  `extra[,FLAG]` (FLAG: nonboot, discovered, separate-dc, available,
+  unavailable), `--nbft-discovery [TRADDR:]PORT`, `--nbft-no-root`.
+  This tests the OS side (dracut, `connect-all --nbft`), not firmware
+  booting from NVMe/TCP. `lab boot nbft FILE` + `nvme nbft show
+  --nbft-path DIR` shows what libnvme reads. Details: docs/testing.md.
 - NVMe/TCP: `nvmet-target add-subsys NQN --no-auth --host HOSTNQN` on
   nvmet (prints the port, from 4421), `nvme connect -t tcp -a nvmet -s
   PORT -n NQN` on nvme, then `disconnect` and `del-subsys`.

@@ -1,0 +1,12 @@
+# rd.nvmf.nonbft: the initrd ignores the NBFT, and with no other source
+# it finds no root.
+name = "NBFT ignored with rd.nvmf.nonbft"
+tags = ["nbft"]
+
+[boot]
+nbft = true
+append = ["rd.nvmf.nonbft"]
+timeout = 150
+
+[expect]
+result = "fail"
