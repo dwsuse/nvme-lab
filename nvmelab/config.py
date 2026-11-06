@@ -9,6 +9,11 @@ REPO = Path(__file__).resolve().parent.parent
 LAB_FILE = REPO / 'lab.toml'
 USER_FILE = Path('~/.config/nvme-lab/config.toml')
 SCRATCH = '/root/scratch'
+# The tools of 'lab boot' that live in other repos, overridden by the
+# user's config.toml (target_control =, nvmf_failover =) or the
+# environment (LAB_TARGET_CONTROL, LAB_NVMF_FAILOVER).
+TARGET_CONTROL = '~/blktests/contrib/nvme-target-control/nvme-target-control'
+NVMF_FAILOVER = '~/nvmf-failover'
 
 
 class ConfigError(Exception):
@@ -32,6 +37,8 @@ class Host:
 class Config:
     hosts: dict[str, Host] = field(default_factory=dict)
     ssh_key: str | None = None
+    target_control: str = str(Path(TARGET_CONTROL).expanduser())
+    nvmf_failover: str = str(Path(NVMF_FAILOVER).expanduser())
 
     def host(self, name):
         """The host NAME; also accepts its address."""
@@ -81,10 +88,15 @@ def load(lab_file=None, user_file=None, env=None):
     if not cfg.hosts:
         raise ConfigError(f'{lab_file}: no [hosts.*]')
 
-    if user_file.is_file():
-        cfg.ssh_key = _read(user_file).get('ssh_key')
-    cfg.ssh_key = env.get('LAB_SSH_KEY') or cfg.ssh_key
+    user = _read(user_file) if user_file.is_file() else {}
+    cfg.ssh_key = env.get('LAB_SSH_KEY') or user.get('ssh_key')
     if cfg.ssh_key:
         cfg.ssh_key = str(Path(cfg.ssh_key).expanduser())
+    for key, var, default in (('target_control', 'LAB_TARGET_CONTROL',
+                               TARGET_CONTROL),
+                              ('nvmf_failover', 'LAB_NVMF_FAILOVER',
+                               NVMF_FAILOVER)):
+        value = env.get(var) or user.get(key) or default
+        setattr(cfg, key, str(Path(value).expanduser()))
 
     return cfg

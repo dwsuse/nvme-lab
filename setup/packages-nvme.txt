@@ -22,3 +22,5 @@ bc cpio kmod rsync dwarves libelf-dev libncurses-dev
 python3-configshell-fb python3-venv python3-pip libgnutls28-dev
 # testing
 fio valgrind strace tcpdump ethtool socat jq keyutils psmisc zstd lz4 uuid-runtime
+# nvmf-failover's tcp-port and tcp-refuse faults (also on 'lab boot' paths)
+nftables

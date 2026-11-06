@@ -1,0 +1,15 @@
+# The only root path is refused while the system boots: no root, the
+# boot fails ("game over", nvme-cli#4328).
+name = "NBFT boot, the only root path refused"
+tags = ["nbft", "fault"]
+
+[boot]
+nbft = true
+timeout = 150
+
+[[fault]]
+kind = "tcp-refuse"
+path = "root"
+
+[expect]
+result = "fail"

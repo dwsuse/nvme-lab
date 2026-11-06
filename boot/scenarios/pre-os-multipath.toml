@@ -1,0 +1,14 @@
+# dracut's pre-pivot hook with a multipath root: every path of the root
+# subsystem (the controllers behind the head the root is mounted on)
+# gets owner=pre-os.
+name = "registry owners of a multipath root"
+tags = ["pre-os", "nbft", "multipath", "nvme-cli-3"]
+
+[boot]
+nbft_ssns = ["{root2}/{root_nqn}", "extra,nonboot"]
+
+[expect]
+result = "pass"
+controllers = ["root", "extra"]
+paths = { root = 2 }
+owners = { root = "pre-os", extra = "" }

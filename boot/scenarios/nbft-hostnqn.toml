@@ -1,0 +1,16 @@
+# The system's host identity differs from the NBFT's, and the target only
+# lets in the NBFT's: connect-all --nbft must connect as the NBFT's host
+# (nvme-cli#4384, "connect-all --nbft connects as the system's host").
+name = "NBFT boot, the system's host NQN differs from the NBFT's"
+tags = ["nbft", "hostnqn"]
+
+[boot]
+nbft = true
+host_identity = false
+append = ["rd.nvmf.hostnqn={other_hostnqn}", "rd.nvmf.hostid={other_hostid}"]
+timeout = 150
+
+[expect]
+result = "pass"
+controllers = ["root"]
+hostnqn = { root = "{hostnqn}" }

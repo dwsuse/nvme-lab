@@ -2,47 +2,75 @@
 
 A scenario is a TOML file in boot/scenarios/:
 
-    name = "NBFT boot, a non-bootable second subsystem"
-    tags = ["nbft"]
+    name = "NBFT boot, one of two root paths refused"
+    tags = ["nbft", "multipath", "fault"]
+    xfail = "why it fails today, with a link"   # optional
 
     [boot]                      # the options of 'lab boot run'
     source = "none"             # cmdline, static, legacy, none
     hostonly = false
+    host_identity = true        # rd.nvmf.hostnqn/hostid (no hostonly)
     nbft = true
-    nbft_ssns = ["extra,nonboot"]
+    nbft_ssns = ["{root2}/{root_nqn}", "extra,nonboot"]
     nbft_discovery = []
     nbft_no_root = false
     append = ["rd.nvmf.discover=tcp,{traddr},,{extra}"]
     timeout = 240
 
+    [[fault]]                   # while the guest boots, see faults.py
+    kind = "tcp-refuse"         # port-removed, ana, tcp-refuse, tcp-drop
+    path = "root2"              # root, root2, extra
+    state = "inaccessible"      # ana only
+
     [expect]
     result = "pass"             # pass: the root's /init ran; or fail
     controllers = ["root", "extra"]
+    paths = { root = 1 }
     owners = { root = "pre-os", extra = "" }
+    ctrl_loss_tmo = { root = "off" }
+    hostnqn = { root = "{hostnqn}" }
 
-In append, nbft_ssns and nbft_discovery, {traddr} and {trsvcid} are the
-root subsystem's target, {extra} is the port of the extra subsystem.
-source defaults to cmdline, or to none with an NBFT.
+Placeholders, in append, nbft_ssns, nbft_discovery and the expected host
+NQNs: {traddr}, {trsvcid} (the root's first path), {root2} (its second
+path), {extra} (the extra subsystem's port), {root_nqn}, {extra_nqn},
+{hostnqn} and {hostid} (the guest's identity, the one the target lets
+in), {other_hostnqn} and {other_hostid} (an identity the target doesn't
+know). source defaults to cmdline, or to none with an NBFT.
 
 expect.controllers is the set of subsystems that have a controller after
 switch-root: root, extra (the subsystems of 'lab boot setup') or an NQN.
-expect.owners is the nvme-cli registry owner of every controller of a
-subsystem, "" for unowned. Both are checked only when given, against the
-state the root's /init reports (state.txt, see boot/mkroot.sh).
+paths counts the controllers of a subsystem. owners, ctrl_loss_tmo and
+hostnqn are what every controller of a subsystem has: its nvme-cli
+registry owner ("" for unowned), its ctrl_loss_tmo as sysfs shows it
+("off" for -1) and its host NQN. Each is checked only when given,
+against the state the root's /init reports (state.txt, see
+boot/mkroot.sh).
+
+A scenario with xfail is expected to fail for the reason given: it is
+reported as XFAIL while it does, and as XPASS, a failure, once it passes,
+so that its expectation gets updated.
 """
 
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import faults
 from .config import ConfigError
 
 DIR = Path(__file__).resolve().parent.parent / 'boot' / 'scenarios'
 
-BOOT_KEYS = {'source': str, 'hostonly': bool, 'nbft': bool,
-             'nbft_ssns': list, 'nbft_discovery': list,
+BOOT_KEYS = {'source': str, 'hostonly': bool, 'host_identity': bool,
+             'nbft': bool, 'nbft_ssns': list, 'nbft_discovery': list,
              'nbft_no_root': bool, 'append': list, 'timeout': int}
-EXPECT_KEYS = {'result': str, 'controllers': list, 'owners': dict}
+EXPECT_KEYS = {'result': str, 'controllers': list, 'paths': dict,
+               'owners': dict, 'ctrl_loss_tmo': dict, 'hostnqn': dict}
+FAULT_KEYS = {'kind': str, 'path': str, 'state': str}
+TOP_KEYS = {'name', 'tags', 'xfail', 'boot', 'fault', 'expect'}
+
+# An identity the target doesn't let in
+OTHER_HOST_ID = '0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e'
+OTHER_HOST_NQN = f'nqn.2014-08.org.nvmexpress:uuid:{OTHER_HOST_ID}'
 
 
 @dataclass
@@ -50,11 +78,15 @@ class Scenario:
     id: str                     # the file name without .toml
     name: str
     tags: list = field(default_factory=list)
+    xfail: str | None = None
     boot: dict = field(default_factory=dict)
+    faults: list = field(default_factory=list)
     expect: dict = field(default_factory=dict)
 
 
 def check_table(path, table, keys, what):
+    if not isinstance(table, dict):
+        raise ConfigError(f'{path}: {what} must be a table')
     for key, value in table.items():
         if key not in keys:
             raise ConfigError(f"{path}: unknown key '{key}' in {what}")
@@ -69,22 +101,29 @@ def load(path):
         data = tomllib.loads(path.read_text(encoding='utf-8'))
     except (OSError, tomllib.TOMLDecodeError) as e:
         raise ConfigError(f'{path}: {e}') from None
-    unknown = set(data) - {'name', 'tags', 'boot', 'expect'}
+    unknown = set(data) - TOP_KEYS
     if unknown:
         raise ConfigError(f"{path}: unknown key '{sorted(unknown)[0]}'")
     s = Scenario(id=path.stem, name=data.get('name', path.stem),
-                 tags=data.get('tags', []), boot=data.get('boot', {}),
-                 expect=data.get('expect', {}))
+                 tags=data.get('tags', []), xfail=data.get('xfail'),
+                 boot=data.get('boot', {}), expect=data.get('expect', {}))
     check_table(path, s.boot, BOOT_KEYS, 'boot')
     check_table(path, s.expect, EXPECT_KEYS, 'expect')
     if s.expect.get('result', 'pass') not in ('pass', 'fail'):
         raise ConfigError(f'{path}: expect.result must be pass or fail')
+    for f in data.get('fault', []):
+        check_table(path, f, FAULT_KEYS, 'fault')
+        try:
+            s.faults.append(faults.make(f.get('kind'), f.get('path'),
+                                        f.get('state')))
+        except ConfigError as e:
+            raise ConfigError(f'{path}: {e}') from None
     return s
 
 
-def find(names=(), tags=()):
+def find(names=(), tags=(), skip_tags=()):
     """The scenarios NAMES (ids or paths; default: all of DIR) that have
-    one of TAGS (default: any)."""
+    one of TAGS (default: any) and none of SKIP_TAGS."""
     if names:
         paths = [Path(n) if n.endswith('.toml') else DIR / f'{n}.toml'
                  for n in names]
@@ -93,24 +132,40 @@ def find(names=(), tags=()):
     scenarios = [load(p) for p in paths]
     if tags:
         scenarios = [s for s in scenarios if set(tags) & set(s.tags)]
+    if skip_tags:
+        scenarios = [s for s in scenarios if not set(skip_tags) & set(s.tags)]
     return scenarios
+
+
+def placeholders(env):
+    """The values of the placeholders for the target ENV (boot.Env)."""
+    from .boot import EXTRA_NQN, HOST_ID, HOST_NQN, ROOT_NQN
+    values = {'traddr': env.traddr, 'root_nqn': ROOT_NQN,
+              'extra_nqn': EXTRA_NQN, 'hostnqn': HOST_NQN,
+              'hostid': HOST_ID, 'other_hostnqn': OTHER_HOST_NQN,
+              'other_hostid': OTHER_HOST_ID}
+    for name, key in (('root', 'trsvcid'), ('root2', 'root2'),
+                      ('extra', 'extra')):
+        if name in env.paths:
+            values[key] = env.paths[name][1]
+    return values
 
 
 def expand(value, values):
     """VALUE with the placeholders of VALUES filled in."""
     try:
         return value.format(**values)
-    except (KeyError, IndexError) as e:
-        raise ConfigError(f"unknown placeholder {e} in '{value}'") from None
+    except KeyError as e:
+        raise ConfigError(f"unknown placeholder {e} in '{value}' (or no such "
+                          "path: run 'lab boot setup' again)") from None
+    except (IndexError, ValueError) as e:
+        raise ConfigError(f"bad placeholder in '{value}': {e}") from None
 
 
-def run_options(s, target, extra):
-    """The options of boot.run() for scenario S: run_argv()'s, plus
-    nbft_options."""
-    values = {'traddr': target[0], 'trsvcid': target[1],
-              'extra': extra or ''}
-    if '{extra}' in str(s.boot) and not extra:
-        raise ConfigError("no extra subsystem: run 'lab boot setup' again")
+def run_options(s, env):
+    """The options of boot.run() for scenario S on the target ENV:
+    run_argv()'s, plus nbft_options and fault_specs."""
+    values = placeholders(env)
     b = s.boot
     nbft = None
     if b.get('nbft') or b.get('nbft_ssns') or b.get('nbft_discovery') \
@@ -122,27 +177,34 @@ def run_options(s, target, extra):
     append = ' '.join(expand(v, values) for v in b.get('append', []))
     return dict(source=b.get('source',
                              'none' if nbft is not None else 'cmdline'),
-                hostonly=b.get('hostonly', False), append=append or None,
-                timeout=b.get('timeout'), nbft_options=nbft)
+                hostonly=b.get('hostonly', False),
+                host_identity=b.get('host_identity', True),
+                append=append or None, timeout=b.get('timeout'),
+                nbft_options=nbft, fault_specs=s.faults)
 
 
 def parse_state(text):
-    """state.txt: {controller: (subsysnqn, owner or None)}; None: no
-    registry entry or no owner."""
+    """state.txt: {controller: {'nqn':, 'owner':, and the KEY=VALUE fields
+    of its ctrl line}}; owner None: no registry entry or no owner."""
     ctrls, owners = {}, {}
     for line in text.splitlines():
         words = line.split()
-        if len(words) == 4 and words[0] == 'ctrl':
-            ctrls[words[1]] = words[3]
+        if len(words) >= 4 and words[0] == 'ctrl':
+            info = {'transport': words[2], 'nqn': words[3]}
+            info |= dict(w.split('=', 1) for w in words[4:] if '=' in w)
+            ctrls[words[1]] = info
         elif len(words) == 3 and words[0] == 'registry' \
                 and words[2].startswith('owner='):
             owners[words[1]] = words[2][len('owner='):] or None
-    return {c: (nqn, owners.get(c)) for c, nqn in ctrls.items()}
+    for c, info in ctrls.items():
+        info['owner'] = owners.get(c)
+    return ctrls
 
 
-def verdict(s, passed, state, roles):
+def verdict(s, passed, state, roles, values=None):
     """What is wrong with the run of S (empty: nothing). PASSED: the
-    root's /init ran; STATE: parse_state(); ROLES: {nqn: role}."""
+    root's /init ran; STATE: parse_state(); ROLES: {nqn: role}; VALUES:
+    the placeholders, for the expected host NQNs."""
     errors = []
     want = s.expect.get('result', 'pass')
     if (want == 'pass') != passed:
@@ -151,16 +213,33 @@ def verdict(s, passed, state, roles):
     if not passed:
         return errors
     by_subsys = {}
-    for ctrl, (nqn, owner) in sorted(state.items()):
-        by_subsys.setdefault(roles.get(nqn, nqn), []).append((ctrl, owner))
+    for ctrl, info in sorted(state.items()):
+        by_subsys.setdefault(roles.get(info['nqn'], info['nqn']),
+                             []).append((ctrl, info))
     if 'controllers' in s.expect:
         want = sorted(set(s.expect['controllers']))
         if sorted(by_subsys) != want:
             errors.append(f'controllers of {sorted(by_subsys)}, expected '
                           f'{want}')
-    for subsys, owner in s.expect.get('owners', {}).items():
-        for ctrl, got in by_subsys.get(subsys, []):
-            if (got or '') != owner:
-                errors.append(f"{subsys} {ctrl}: owner '{got or ''}', "
-                              f"expected '{owner}'")
+    for subsys, count in s.expect.get('paths', {}).items():
+        got = len(by_subsys.get(subsys, []))
+        if got != count:
+            errors.append(f'{subsys}: {got} paths, expected {count}')
+    for key, what in (('owners', 'owner'), ('ctrl_loss_tmo', 'ctrl_loss_tmo'),
+                      ('hostnqn', 'hostnqn')):
+        for subsys, want in s.expect.get(key, {}).items():
+            if values is not None:
+                want = expand(str(want), values)
+            for ctrl, info in by_subsys.get(subsys, []):
+                got = info.get(what) or ''
+                if got != str(want):
+                    errors.append(f"{subsys} {ctrl}: {what} '{got}', "
+                                  f"expected '{want}'")
     return errors
+
+
+def outcome(s, errors):
+    """PASS, FAIL, XFAIL or XPASS, and whether that counts as failed."""
+    if s.xfail:
+        return ('XFAIL', False) if errors else ('XPASS', True)
+    return ('FAIL', True) if errors else ('PASS', False)

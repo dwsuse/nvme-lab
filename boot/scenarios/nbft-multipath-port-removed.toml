@@ -1,0 +1,16 @@
+# The NBFT has two root paths, but the target port of one is gone while
+# the system boots. The boot goes on with the other path.
+name = "NBFT boot, two root paths, one target port removed"
+tags = ["nbft", "multipath", "fault"]
+
+[boot]
+nbft_ssns = ["{root2}/{root_nqn}"]
+
+[[fault]]
+kind = "port-removed"
+path = "root2"
+
+[expect]
+result = "pass"
+controllers = ["root"]
+paths = { root = 1 }

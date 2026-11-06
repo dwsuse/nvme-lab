@@ -87,7 +87,7 @@ class Ssns:
     secondary_hfis: tuple = ()
     flags: tuple = ()               # names of SSNS_FLAGS
     discovery: int = 0              # index of the discovery descriptor
-    nid_type: int = 0
+    nid_type: int = 0               # 1: EUI-64, 2: NGUID, 3: UUID
     nid: bytes = b''
     hdgst: bool = False
     ddgst: bool = False
@@ -230,9 +230,10 @@ def build(table, oem_id='NVMLAB', oem_table_id='NBFT'):
             trflags |= TRFLAG_DDGST
         if len(s.nid) > 16:
             raise NbftError(f'SSNS {s.nqn}: NID longer than 16 bytes')
-        # Firmware writes the secondary HFI list even when it is empty:
-        # one byte, 0.
-        secondary = bytes(s.secondary_hfis) or b'\0'
+        # The secondary HFI list of firmware starts with the primary HFI
+        # (one byte for a single HFI): libnvme 1 counts every byte as an
+        # HFI and crashes on an index that names none.
+        secondary = bytes(dict.fromkeys((s.hfi, *s.secondary_hfis)))
         ssns += pack(SSNS, DESC_SSNS, i, ssns_flags(s.flags), TRTYPE_TCP,
                      trflags, s.discovery, 0, *heap.add(ip16(s.traddr)),
                      *heap.add_str(str(s.trsvcid)), 0, s.nsid, s.nid_type,

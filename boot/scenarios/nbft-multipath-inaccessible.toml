@@ -1,0 +1,17 @@
+# The NBFT has two root paths; the ANA group of one is inaccessible. The
+# host connects both, I/O goes through the optimized one.
+name = "NBFT boot, two root paths, one ANA inaccessible"
+tags = ["nbft", "multipath", "fault"]
+
+[boot]
+nbft_ssns = ["{root2}/{root_nqn}"]
+
+[[fault]]
+kind = "ana"
+state = "inaccessible"
+path = "root2"
+
+[expect]
+result = "pass"
+controllers = ["root"]
+paths = { root = 2 }

@@ -1,0 +1,12 @@
+# The root subsystem on two ports, both on the command line: native
+# multipath, one head, two controllers.
+name = "rd.nvmf.discover= of both root paths"
+tags = ["cmdline", "multipath"]
+
+[boot]
+append = ["rd.nvmf.discover=tcp,{traddr},,{root2}"]
+
+[expect]
+result = "pass"
+controllers = ["root"]
+paths = { root = 2 }

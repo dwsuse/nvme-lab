@@ -1,0 +1,14 @@
+# An initrd with nvme-cli 2 has no ownership registry: the NBFT boot
+# works, and the root's controller has no registry entry (nvme-cli#4328,
+# "initrd without registry support"). Run with an nvme-cli 2 tree,
+# e.g. v2.16, the last 2.x release.
+name = "NBFT boot with nvme-cli 2, no registry"
+tags = ["nvme-cli-2"]
+
+[boot]
+nbft = true
+
+[expect]
+result = "pass"
+controllers = ["root"]
+owners = { root = "" }

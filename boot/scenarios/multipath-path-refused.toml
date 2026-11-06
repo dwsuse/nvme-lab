@@ -1,0 +1,17 @@
+# One of the two root paths fails while the system boots (nvme-cli#4328,
+# "paths that fail at boot"): the host refuses connections to it. The
+# boot goes on with the other path.
+name = "two root paths on the command line, one refused at boot"
+tags = ["cmdline", "multipath", "fault"]
+
+[boot]
+append = ["rd.nvmf.discover=tcp,{traddr},,{root2}"]
+
+[[fault]]
+kind = "tcp-refuse"
+path = "root2"
+
+[expect]
+result = "pass"
+controllers = ["root"]
+paths = { root = 1 }

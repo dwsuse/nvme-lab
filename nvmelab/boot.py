@@ -3,7 +3,9 @@
 'lab boot setup' creates the lab-boot container on the CI host
 (Tumbleweed: dracut, a kernel, QEMU, nvme-cli's build tools; the host's
 /dev/kvm), a subsystem on the target host for the guest's host NQN only,
-and a small root file system on its namespace. 'lab boot run' builds an
+exported on two ports (two paths, for multipath), and a small root file
+system on its namespace. The target is set up with nvme-target-control
+(target.py). 'lab boot run' builds an
 initrd and boots it: the case passes when the guest's /init on the
 NVMe/TCP root runs. A run can install an nvme-cli tree that 'lab sync'
 put on the CI host, and overlay dracut's nvmf module with a local
@@ -12,19 +14,24 @@ subsystem ('--nbft'; nbft.py writes it, QEMU passes it on as an ACPI
 table). 'lab boot nbft' writes such a table to a local file. Setup also
 makes a second subsystem for the guest, with no root on it, for the
 cases with more than one subsystem. The root's /init reports the NVMe
-controllers and the nvme-cli registry it finds after switch-root.
-'lab boot teardown' removes it all.
+controllers and the nvme-cli registry it finds after switch-root. A run
+can break paths while the guest boots (faults.py): on the target with
+nvme-target-control, on the network with nvmf-failover. 'lab boot test'
+runs the scenarios of boot/scenarios (scenario.py). 'lab boot teardown'
+removes it all.
 
 The scripts that do the work are in boot/ of this repo.
 """
 
-import re
 import shlex
 import subprocess
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import nbft, remote, scenario, sync
+from . import faults, nbft, remote, scenario, sync
 from .config import SCRATCH, ConfigError
+from .target import TargetControl
 
 CONTAINER = 'lab-boot'
 BOOT_DIR = f'{SCRATCH}/lab-boot'
@@ -36,6 +43,10 @@ ROOT_NQN = 'nqn.2026-11.io.lab:lab-boot-root'
 # A second subsystem for the guest, no root: for the cases with more than
 # one subsystem ('--nbft-ssns extra', rd.nvmf.discover= of its port)
 EXTRA_NQN = 'nqn.2026-11.io.lab:lab-boot-extra'
+ROOT_SUBSYS_UUID = '3c1e8f2a-5b7d-4e9f-a1c3-d5e7f9a1b3c5'
+EXTRA_SUBSYS_UUID = '4d2f9a3b-6c8e-4fa0-b2d4-e6f8a0b2c4d6'
+# The paths of setup: the root subsystem on two ports, the extra one on one
+ROOT_PORTS, EXTRA_PORTS = 2, 1
 HOST_ID = '6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
 HOST_NQN = f'nqn.2014-08.org.nvmexpress:uuid:{HOST_ID}'
 ROOT_UUID = 'b0936c83-d08a-4c81-bb63-efc6e619581f'
@@ -73,24 +84,58 @@ def exec_argv(script, *args):
             f'{CONTAINER_DIR}/scripts/{script}', *args]
 
 
-def parse_trsvcid(output):
-    """The TCP port of 'nvmet-target add-subsys' ("port=1 trsvcid=4421")."""
-    m = re.search(r'\btrsvcid=(\d+)', output)
-    if not m:
-        raise ConfigError(f'no trsvcid in the add-subsys output:\n{output}')
-    return m.group(1)
+@dataclass
+class Env:
+    """What setup made: the target's address, the name of the target
+    host, and the paths as {name: (port ID, service ID)}: root, root2
+    (the root subsystem's second port), extra."""
+    traddr: str
+    target_host: str
+    paths: dict = field(default_factory=dict)
+
+    @property
+    def target(self):
+        """(TRADDR, TRSVCID) of the root subsystem's first path."""
+        return self.traddr, self.trsvcid('root')
+
+    def trsvcid(self, path):
+        return self.path(path)[1]
+
+    def path(self, name):
+        if name not in self.paths:
+            raise ConfigError(f"no path '{name}' (paths: "
+                              f"{', '.join(self.paths)}); run 'lab boot "
+                              'setup\' again?')
+        return self.paths[name]
+
+    def text(self):
+        def ports(names):
+            return ','.join(':'.join(self.paths[n]) for n in names
+                            if n in self.paths)
+        return (f'TRADDR={self.traddr}\nTARGET_HOST={self.target_host}\n'
+                f"ROOT_PORTS={ports(['root', 'root2'])}\n"
+                f"EXTRA_PORTS={ports(['extra'])}\n")
+
+
+def path_names(ports, names):
+    """{name: (port ID, service ID)} for PORTS, a list of such pairs."""
+    return dict(zip(names, ports))
 
 
 def parse_env(text):
-    """The target.env that setup wrote: (TRADDR, TRSVCID) of the root
-    subsystem and the TRSVCID of the extra one (None before it had
-    one)."""
+    """The target.env that setup wrote, as an Env."""
     values = dict(line.split('=', 1) for line in text.split() if '=' in line)
-    try:
-        target = values['TRADDR'], values['TRSVCID']
-    except KeyError:
-        raise ConfigError("no target: run 'lab boot setup' first") from None
-    return target, values.get('EXTRA_TRSVCID')
+    if 'ROOT_PORTS' not in values:
+        raise ConfigError("no target, or one of an older lab: run 'lab boot "
+                          "setup'")
+
+    def ports(value):
+        return [tuple(p.split(':', 1)) for p in value.split(',') if p]
+
+    env = Env(values['TRADDR'], values.get('TARGET_HOST', 'nvmet'))
+    env.paths |= path_names(ports(values['ROOT_PORTS']), ['root', 'root2'])
+    env.paths |= path_names(ports(values.get('EXTRA_PORTS', '')), ['extra'])
+    return env
 
 
 def resolve_ssns_spec(spec, extra):
@@ -118,6 +163,13 @@ def nbft_table(target, root=True, ssns=(), discovery=(), extra=None):
         table.ssns.append(nbft.Ssns(traddr, trsvcid, ROOT_NQN))
     try:
         table.ssns += [nbft.parse_ssns_spec(s, traddr) for s in ssns]
+        # The namespace identifier of the namespaces of setup: the target
+        # gives them the subsystem's UUID (nvme-target-control).
+        for s in table.ssns:
+            ns_uuid = {ROOT_NQN: ROOT_SUBSYS_UUID,
+                       EXTRA_NQN: EXTRA_SUBSYS_UUID}.get(s.nqn)
+            if ns_uuid:
+                s.nid_type, s.nid = 3, uuid.UUID(ns_uuid).bytes
         for d in discovery:
             addr, _, port = d.rpartition(':')
             if not port.isdigit():
@@ -135,7 +187,7 @@ def nbft_table(target, root=True, ssns=(), discovery=(), extra=None):
 
 def run_argv(name, target, tree=None, package=False, module=None,
              source='cmdline', hostonly=False, append=None, timeout=None,
-             nbft_file=None):
+             nbft_file=None, host_identity=True):
     """The docker exec of one boot case; MODULE is the overlay's
     directory and NBFT_FILE the table in the container."""
     if source not in SOURCES:
@@ -155,6 +207,8 @@ def run_argv(name, target, tree=None, package=False, module=None,
         args += ['--dracut-module', module]
     if hostonly:
         args.append('--hostonly')
+    if not host_identity:
+        args.append('--no-host-identity')
     if append:
         args += ['--append', append]
     if timeout:
@@ -164,6 +218,14 @@ def run_argv(name, target, tree=None, package=False, module=None,
     return exec_argv('boot.sh', *args)
 
 
+def target_address(cfg, host, target_host):
+    """The target's address as the CI host resolves it: the guest's user
+    networking goes out through the CI host."""
+    addr = remote.run(cfg, host, ['getent', 'ahostsv4', target_host.address],
+                      check=True, capture_output=True, encoding='utf-8')
+    return addr.stdout.split()[0]
+
+
 def setup(cfg, host, target_host, recreate=False):
     upload(cfg, host, SCRIPTS, f'{BOOT_DIR}/scripts')
     container = ['sh', f'{BOOT_DIR}/scripts/container.sh', HOST_NQN, HOST_ID]
@@ -171,30 +233,33 @@ def setup(cfg, host, target_host, recreate=False):
         container.append('--recreate')
     remote.run(cfg, host, container, check=True)
 
-    # Fresh subsystems, for the guest's host NQN only.
-    def add_subsys(nqn, size):
+    traddr = target_address(cfg, host, target_host)
+    tc = TargetControl(cfg, target_host, traddr)
+    # Fresh subsystems, for the guest's host NQN only. The ones of an
+    # older lab came from nvmet-target.
+    for nqn in (ROOT_NQN, EXTRA_NQN):
         remote.run(cfg, target_host, ['nvmet-target', 'del-subsys', nqn],
                    capture_output=True)
-        out = remote.run(cfg, target_host,
-                         ['nvmet-target', 'add-subsys', nqn, '--size',
-                          size, '--host', HOST_NQN, '--no-auth'],
-                         check=True, capture_output=True, encoding='utf-8')
-        return parse_trsvcid(out.stdout)
+        tc.cleanup(nqn, check=False)
+    tc.setup(ROOT_NQN, ROOT_SUBSYS_UUID, HOST_NQN, ports=ROOT_PORTS)
+    tc.setup(EXTRA_NQN, EXTRA_SUBSYS_UUID, HOST_NQN, ports=EXTRA_PORTS)
+    env = Env(traddr, target_host.name)
+    env.paths |= path_names(tc.ports(ROOT_NQN), ['root', 'root2'])
+    env.paths |= path_names(tc.ports(EXTRA_NQN), ['extra'])
+    write_env(cfg, host, env)
+    # A fault of an interrupted run
+    faults.clear_network(cfg, host)
+    remote.run(cfg, host, exec_argv('mkroot.sh', traddr, env.trsvcid('root'),
+                                    ROOT_NQN, ROOT_UUID), check=True)
+    print(f"lab-boot: root on {ROOT_NQN} at {traddr}:{env.trsvcid('root')} "
+          f"and :{env.trsvcid('root2')}")
+    print(f'lab-boot: extra subsystem {EXTRA_NQN} at '
+          f"{traddr}:{env.trsvcid('extra')}")
 
-    trsvcid = add_subsys(ROOT_NQN, '512M')
-    extra = add_subsys(EXTRA_NQN, '64M')
-    # The guest's user networking goes out through the CI host: use the
-    # target's address as the CI host resolves it.
-    addr = remote.run(cfg, host, ['getent', 'ahostsv4', target_host.address],
-                      check=True, capture_output=True, encoding='utf-8')
-    traddr = addr.stdout.split()[0]
-    remote.run(cfg, host, f'printf "TRADDR=%s\\nTRSVCID=%s\\n'
-               f'EXTRA_TRSVCID=%s\\n" {traddr} {trsvcid} {extra} '
-               f'> {BOOT_DIR}/target.env', check=True)
-    remote.run(cfg, host, exec_argv('mkroot.sh', traddr, trsvcid, ROOT_NQN,
-                                    ROOT_UUID), check=True)
-    print(f'lab-boot: root on {ROOT_NQN} at {traddr}:{trsvcid}')
-    print(f'lab-boot: extra subsystem {EXTRA_NQN} at {traddr}:{extra}')
+
+def write_env(cfg, host, env):
+    remote.run(cfg, host, f'cat > {BOOT_DIR}/target.env',
+               input=env.text().encode(), check=True)
 
 
 def read_env(cfg, host):
@@ -210,10 +275,13 @@ def nbft_path(name):
     return f'{BOOT_DIR}/nbft/{name}', f'{CONTAINER_DIR}/nbft/{name}'
 
 
-def run(cfg, host, name, module=None, nbft_options=None, **kwargs):
+def run(cfg, host, name, module=None, nbft_options=None, fault_specs=(),
+        **kwargs):
     """Boot case NAME. NBFT_OPTIONS: the dict of nbft_table()'s
-    options, or None for no NBFT."""
-    target, extra = read_env(cfg, host)
+    options, or None for no NBFT. FAULT_SPECS: the faults to put down
+    while the guest boots (faults.parse())."""
+    env = read_env(cfg, host)
+    target, extra = env.target, env.paths.get('extra', (None, None))[1]
     overlay = table = None
     # The scripts of this checkout, not the ones of the last setup
     upload(cfg, host, SCRIPTS, f'{BOOT_DIR}/scripts')
@@ -228,7 +296,9 @@ def run(cfg, host, name, module=None, nbft_options=None, **kwargs):
                    f'cat > {shlex.quote(on_host)}', input=data, check=True)
     argv = run_argv(name, target, module=overlay, nbft_file=table,
                     **kwargs)
-    return remote.run(cfg, host, argv).returncode
+    with faults.Faults(cfg, host, env, fault_specs,
+                       on_change=lambda e: write_env(cfg, host, e)):
+        return remote.run(cfg, host, argv).returncode
 
 
 def read_state(cfg, host, name):
@@ -243,12 +313,13 @@ def test(cfg, host, scenarios, prefix='t', module=None, tree=None,
          package=False):
     """Run SCENARIOS as the cases PREFIX-ID; print a verdict for each.
     Returns the number of scenarios that failed."""
-    target, extra = read_env(cfg, host)
     roles = {ROOT_NQN: 'root', EXTRA_NQN: 'extra'}
-    failed = []
+    failed, counts = [], {}
     for s in scenarios:
+        # read again: a fault may have moved a path to another port
+        env = read_env(cfg, host)
         name = sync.check_name(f'{prefix}-{s.id}')
-        options = scenario.run_options(s, target, extra)
+        options = scenario.run_options(s, env)
         print(f'--- {s.id}: {s.name}', flush=True)
         rc = run(cfg, host, name, module=module, tree=tree, package=package,
                  **options)
@@ -257,21 +328,32 @@ def test(cfg, host, scenarios, prefix='t', module=None, tree=None,
                       f'{BOOT_DIR}/out/{name}/log']
         else:
             state = scenario.parse_state(read_state(cfg, host, name))
-            errors = scenario.verdict(s, rc == 0, state, roles)
-        print(f"{'FAIL' if errors else 'PASS'} {s.id}", flush=True)
+            errors = scenario.verdict(s, rc == 0, state, roles,
+                                      scenario.placeholders(env))
+        result, bad = scenario.outcome(s, errors)
+        counts[result] = counts.get(result, 0) + 1
+        print(f'{result} {s.id}', flush=True)
+        if result == 'XFAIL':
+            print(f'    expected: {s.xfail}', flush=True)
+        if result == 'XPASS':
+            print(f'    passes now, update the scenario: {s.xfail}',
+                  flush=True)
         for e in errors:
             print(f'    {e}', flush=True)
-        if errors:
+        if bad:
             failed.append(s.id)
-    print(f'{len(scenarios) - len(failed)}/{len(scenarios)} scenarios '
-          f"passed{': failed ' + ' '.join(failed) if failed else ''}")
+    summary = ', '.join(f'{n} {r}' for r, n in sorted(counts.items()))
+    print(f'{len(scenarios)} scenarios: {summary}'
+          f"{'; failed: ' + ' '.join(failed) if failed else ''}")
     return len(failed)
 
 
 def teardown(cfg, host, target_host):
     remote.run(cfg, host, ['docker', 'rm', '-f', CONTAINER],
                capture_output=True)
+    faults.clear_network(cfg, host)
+    tc = TargetControl(cfg, target_host,
+                       target_address(cfg, host, target_host))
     for nqn in (ROOT_NQN, EXTRA_NQN):
-        remote.run(cfg, target_host, ['nvmet-target', 'del-subsys', nqn],
-                   capture_output=True)
+        tc.cleanup(nqn, check=False)
     remote.run(cfg, host, ['rm', '-rf', '--', BOOT_DIR], check=True)

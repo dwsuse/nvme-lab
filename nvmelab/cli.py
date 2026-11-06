@@ -14,7 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import boot, ci, config, inventory, parity, remote, scenario, sync
+from . import (boot, ci, config, faults, inventory, parity, remote,
+               scenario, sync)
 from .config import SCRATCH, ConfigError
 
 
@@ -117,8 +118,10 @@ def cmd_boot_run(cfg, args):
     source = args.source or ('none' if nbft is not None else 'cmdline')
     options = dict(tree=args.nvme, package=args.nvme_package,
                    source=source, hostonly=args.hostonly,
+                   host_identity=not args.no_host_identity,
                    append=' '.join(args.append) or None,
                    timeout=args.timeout)
+    fault_specs = [faults.parse(f) for f in args.fault]
     if args.dry_run:
         if nbft is not None:
             # check it
@@ -130,18 +133,22 @@ def cmd_boot_run(cfg, args):
                              boot.nbft_path(args.name)[1],
                              **options)
         print(shlex.join(remote.ssh_argv(cfg, host, argv)))
+        for f in fault_specs:
+            print(f"fault: {f['kind']} on {f['path']}")
         return 0
     return boot.run(cfg, host, args.name, module=args.dracut_module,
-                    nbft_options=nbft, **options)
+                    nbft_options=nbft, fault_specs=fault_specs, **options)
 
 
 def cmd_boot_test(cfg, args):
-    scenarios = scenario.find(args.scenario, args.tag)
+    scenarios = scenario.find(args.scenario, args.tag, args.skip_tag)
     if not scenarios:
         raise ConfigError('no scenario selected')
     if args.list:
+        width = max(len(s.id) for s in scenarios)
         for s in scenarios:
-            print(f"{s.id:24} {s.name} [{', '.join(s.tags)}]")
+            xfail = ' (xfail)' if s.xfail else ''
+            print(f"{s.id:{width}}  {s.name}{xfail} [{', '.join(s.tags)}]")
         return 0
     host = cfg.host(args.host) if args.host else cfg.ci_host()
     failed = boot.test(cfg, host, scenarios, prefix=args.prefix,
@@ -158,7 +165,8 @@ def cmd_boot_nbft(cfg, args):
                               'TRADDR:TRSVCID')
     else:
         host = cfg.host(args.host) if args.host else cfg.ci_host()
-        target, extra = boot.read_env(cfg, host)
+        env = boot.read_env(cfg, host)
+        target, extra = env.target, env.paths.get('extra', (0, None))[1]
     data = boot.nbft_table(target, extra=extra, **nbft_options(args))
     Path(args.file).write_bytes(data)
     print(f'{args.file}: NBFT, {len(data)} bytes')
@@ -300,6 +308,13 @@ def parser():
                    'the NBFT (the default with one) or --append')
     b.add_argument('--hostonly', action='store_true',
                    help='a hostonly initrd (needed by static and legacy)')
+    b.add_argument('--no-host-identity', action='store_true',
+                   help='no rd.nvmf.hostnqn/hostid on the command line of '
+                   'an initrd that is not hostonly')
+    b.add_argument('--fault', action='append', default=[],
+                   metavar='KIND:PATH', help='break a path while the guest '
+                   'boots: port-removed, ana:STATE, tcp-refuse or tcp-drop, '
+                   'on root, root2 or extra (repeatable)')
     b.add_argument('--append', nargs='*', default=[], metavar='ARG',
                    help='more kernel command line')
     b.add_argument('--timeout', type=int, help='seconds for the boot '
@@ -319,6 +334,9 @@ def parser():
                    'boot/scenarios without .toml) or paths (default: all)')
     b.add_argument('--tag', action='append', default=[],
                    help='only the scenarios with this tag (repeatable)')
+    b.add_argument('--skip-tag', action='append', default=[],
+                   help='not the scenarios with this tag (repeatable), '
+                   'e.g. pre-os without the dracut prototype')
     b.add_argument('--prefix', default='t', help='the cases are named '
                    'PREFIX-SCENARIO (default: t)')
     b.add_argument('--host', help='default: the host with ci = true')

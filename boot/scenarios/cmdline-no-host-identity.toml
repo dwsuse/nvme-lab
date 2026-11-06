@@ -1,0 +1,12 @@
+# An initrd that is not hostonly, without rd.nvmf.hostnqn/hostid: it has
+# no /etc/nvme of the host, nvme-cli makes up a host NQN, and the target
+# with its access list refuses it.
+name = "rd.nvmf.discover= without a host identity"
+tags = ["cmdline", "hostnqn"]
+
+[boot]
+host_identity = false
+timeout = 150
+
+[expect]
+result = "fail"

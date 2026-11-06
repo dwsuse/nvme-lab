@@ -133,7 +133,7 @@ the host identity) on a real kernel, with no hardware.
 lab boot setup                      # once: container, subsystems, root
 lab sync nvme -n pr-4384            # an nvme-cli tree to test
 lab boot test --nvme pr-4384 --dracut-module ~/dracut/modules.d/74nvmf
-lab boot run v2-legacy --nvme v211 --source legacy --hostonly
+lab boot run v2-legacy --nvme v216 --source legacy --hostonly
 lab boot run v3-static --nvme pr-4384 --source static --hostonly \
     --dracut-module ~/dracut/modules.d/74nvmf
 lab boot run v3-cmdline --nvme pr-4384 --hostonly \
@@ -144,9 +144,14 @@ lab boot teardown                   # removes it all
 `setup` creates the container `lab-boot` on `nvme` (openSUSE
 Tumbleweed with dracut, a kernel and QEMU; `nvme`'s `/dev/kvm`), two
 subsystems on `nvmet` that let in only the guest's host NQN, and a root
-file system on the namespace of the first one (`root`). The second one
-(`extra`, no root on it) is for the cases with more than one subsystem;
-setup prints its port. After switch-root, the root's `/init` reports
+file system on the namespace of the first one (`root`). The root
+subsystem is exported on two ports, the paths `root` and `root2` (native
+multipath); the second subsystem (`extra`, no root on it, path `extra`)
+is for the cases with more than one subsystem. setup prints their
+ports. The target is set up with nvme-target-control (blktests,
+`contrib/nvme-target-control`), from `target_control` in
+`~/.config/nvme-lab/config.toml` or `LAB_TARGET_CONTROL` (default: the
+checkout in `~/blktests`); its ports have service IDs from 4430 on. After switch-root, the root's `/init` reports
 the NVMe controllers and the nvme-cli registry entries it finds (the
 registry is in `/run`, which moves along) and powers the guest off.
 
@@ -156,14 +161,20 @@ module in place (the package's, or `--dracut-module DIR`), builds the
 initrd and boots it. It prints `RESULT=PASS` and the root's report, or
 `RESULT=FAIL`, and leaves the initrd, `lsinitrd`, dracut's log, the
 console and the report (`state.txt`) in
-`/root/scratch/lab-boot/out/NAME`.
+`/root/scratch/lab-boot/out/NAME`. A tree's install first removes
+what the last tree installed (its meson install log), so files of an
+earlier tree, e.g. a dracut configuration, don't reach the initrd.
 
 `--source` is where the initrd learns the target from: `cmdline`
 (`rd.nvmf.discover=`, the default), `static` (`nvme-fabrics.conf`,
 nvme-cli 3), `legacy` (`discovery.conf`, nvme-cli 2) or `none`
 (`--append` gives it). `static` and `legacy` need `--hostonly`: only a
 hostonly initrd carries the host's `/etc/nvme`. Without it, the host
-identity goes on the kernel command line (`rd.nvmf.hostnqn=`). dracut's
+identity goes on the kernel command line (`rd.nvmf.hostnqn=`), unless
+`--no-host-identity`, and nowhere else: dracut runs with
+`--no-hostonly-cmdline` too, because Tumbleweed turns
+`hostonly_cmdline` on, and dracut would then write the container's
+identity into the initrd's `etc/cmdline.d` anyway. dracut's
 nvmf module up to at least dracut 112 can't write that (no `/etc/nvme`
 in a non-hostonly initrd), and only reads `nvme-fabrics.conf` with the
 patches of dracut's `nvmf-nvme-cli-3` branch, hence the module overlay
@@ -190,7 +201,9 @@ nvme nbft show --nbft-path /tmp/t -s --hfi -d    # what libnvme reads
 
 The table has the guest's NIC as its HFI (MAC 52:54:00:12:34:56, PCI
 slot 3, 10.0.2.15/24 via 10.0.2.2) and the root subsystem as its first
-SSNS. The kernel command line then has no `ip=` and the source is
+SSNS. The SSNS of the subsystems of setup carry their namespace's UUID
+as NID, and every SSNS lists its HFI as firmware does (libnvme 1, i.e.
+nvme-cli 2, crashes on an SSNS whose HFI list names no HFI). The kernel command line then has no `ip=` and the source is
 `none`: the network and the target come from the NBFT. `--source` still
 adds another one. More descriptors:
 
@@ -211,28 +224,84 @@ the same table to a local file (name it `NBFT` for `nvme nbft show
 The host descriptor has the guest's host NQN and ID, so the target lets
 in the connections of `connect-all --nbft`.
 
+#### Faults
+
+`--fault KIND:PATH` (repeatable) breaks a path from before the guest
+starts until it is off again, and puts it back afterwards, also when the
+run fails:
+
+| Fault | What | Done by |
+|---|---|---|
+| `port-removed:PATH` | the target port is gone, connects are refused | nvme-target-control `remove-port`, `add-ports` afterwards |
+| `ana:STATE:PATH` | the port's ANA group is in STATE (`inaccessible`, `non-optimized`, ...) | nvme-target-control `set-ana`, `optimized` afterwards |
+| `tcp-refuse:PATH` | the CI host refuses the guest's connections to the port (TCP reset) | nvmf-failover `tcp-refuse` |
+| `tcp-drop:PATH` | the CI host drops what the port sends; connects wait for their SYN retries | nvmf-failover `tcp-port` |
+
+PATH is `root`, `root2` or `extra`. The guest's connections leave QEMU's
+user networking on the CI host, so the network faults run there, with
+nftables, from the nvmf-failover checkout of `nvmf_failover` in the
+config or `LAB_NVMF_FAILOVER` (default `~/nvmf-failover`), synced to
+the CI host for the run. setup and teardown remove what an interrupted
+run left (the `inet nvmf_failover` table).
+
 #### Scenarios
 
 `lab boot test` runs boot scenarios and checks what the booted root
-sees. A scenario (`boot/scenarios/*.toml`) is a boot case, the options
-of `lab boot run`, and what to expect: whether the root's `/init` runs,
-which subsystems have a controller after switch-root, and the registry
-owner of their controllers. The format is in `nvmelab/scenario.py` (and
-`lab boot test --help`).
+sees. A scenario (`boot/scenarios/*.toml`) is a boot case (the options
+of `lab boot run`, and faults) and what to expect: whether the root's
+`/init` runs, which subsystems have controllers after switch-root and
+how many, and the registry owner, `ctrl_loss_tmo` and host NQN of their
+controllers. A scenario can be an expected failure (`xfail`, with the
+reason): XFAIL while it fails, XPASS, a failure, once it passes. The
+format is in `nvmelab/scenario.py` (and `lab boot test --help`).
 
 ```
 lab boot test --list                          # the scenarios and tags
 lab boot test --nvme pr-4384 --dracut-module ~/dracut/modules.d/74nvmf
-lab boot test --nvme pr-4384 --tag nbft       # only the NBFT ones
-lab boot test --nvme v211 cmdline legacy-hostonly
+lab boot test --nvme pr-4384 --tag nbft --skip-tag pre-os
+lab boot test --nvme v216 cmdline legacy-hostonly nbft-nvme-cli-2
 ```
 
 Each scenario boots as the case `PREFIX-SCENARIO` (`--prefix`, default
-`t`) and gets a PASS or FAIL line with what differed, then a summary;
-the exit status is 0 when all passed. Tags say what a scenario needs:
-`nvme-cli-3`, or `pre-os`, the registry owners that dracut's
-`nvmf-registry-pre-os` prototype writes (branch `nvmf-registry-pre-os`).
-They are not left out on their own: pick with `--tag` or by name.
+`t`) and gets a PASS, FAIL, XFAIL or XPASS line with what differed, then
+a summary; the exit status is 0 unless one failed or passed unexpectedly.
+Tags say what a scenario is about or needs: `multipath`, `fault`,
+`hostnqn`, `nvme-cli-2`, `nvme-cli-3`, or `pre-os`, the registry owners
+and `ctrl_loss_tmo` of the pre-OS environment (dracut's
+`nvmf-registry-pre-os` prototype, nvme-cli#4328). Pick with `--tag`,
+`--skip-tag` or by name.
+
+The scenarios cover the corner cases of nvme-cli#4328 that the initrd
+decides: a multipath root (one of its paths refused, removed or
+inaccessible at boot), the only root path gone, the NBFT's host identity
+against the system's (#4384), an initrd without a host identity, the
+NBFT's non-bootable, unavailable and missing entries, `rd.nvmf.nonbft`,
+nvme-cli 2 without a registry, and the registry owners and
+`ctrl_loss_tmo` of the pre-OS connections. What nvme-discoverd does
+after switch-root (adoption, reconnects, shutdown) needs the OS, which
+the busybox root doesn't run: nvme-cli's mock scenarios cover that.
+
+#### nvme-cli versions
+
+dracut gets nvme-cli from the distribution, so a change to dracut's
+nvmf module is tested against the releases distributions ship that also
+get a current dracut (decided 2026-11-06, from repology):
+
+| nvme-cli | Why | Scenarios |
+|---|---|---|
+| master, 3.2 | current; Tumbleweed, Arch | all (`pre-os` with the prototype) |
+| 2.16 | last 2.x: RHEL 9/10, Fedora 43/44, Ubuntu 26.04, SLFO | all but `nvme-cli-3`, `pre-os` |
+| 2.13 | Debian 13 | the same |
+| 2.8 | oldest 2.x in a supported LTS: Ubuntu 24.04, SLE 15 SP6 | the same |
+
+```
+lab boot test --nvme v216 --skip-tag nvme-cli-3 --skip-tag pre-os
+```
+
+Not tested: 1.x and 2.x before 2.5 (RHEL 8, Ubuntu 22.04, Debian 12),
+which also keep their old dracut. The module's version boundaries are
+2.5 (NBFT support, `connect-all --nbft`, the long option names), 2.7 (the
+NetApp rule's name) and 3.0 (`nvme-fabrics.conf`, the registry).
 
 What it can't do: firmware that boots from NVMe/TCP, security profiles
 (DH-CHAP/TLS) and extended info descriptors in the NBFT, and the OS

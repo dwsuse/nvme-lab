@@ -5,11 +5,16 @@
 #   boot.sh --name NAME --target TRADDR:TRSVCID --root-uuid UUID
 #           [--nvme-tree DIR | --nvme-package] [--dracut-module DIR]
 #           [--source cmdline|static|legacy|none] [--hostonly]
-#           [--append ARGS] [--timeout SECONDS] [--nbft FILE]
+#           [--no-host-identity] [--append ARGS] [--timeout SECONDS]
+#           [--nbft FILE]
 #
 # --nvme-tree      build the nvme-cli tree in DIR and install it
 #                  (default: keep the nvme that is installed)
 # --nvme-package   reinstall the distribution's nvme-cli
+#                  Both first remove what the last tree installed (its
+#                  meson install log is kept in $INSTALLED), so files of
+#                  an earlier tree, e.g. a dracut configuration, don't
+#                  reach the initrd.
 # --dracut-module  use DIR as dracut's 74nvmf module (default: the
 #                  package's)
 # --source         where the initrd learns the target from:
@@ -20,6 +25,7 @@
 # --hostonly       a hostonly initrd: it carries the container's
 #                  /etc/nvme files. Otherwise the host identity goes on
 #                  the kernel command line (rd.nvmf.hostnqn/hostid).
+# --no-host-identity  not even that: the initrd has no host identity
 # --nbft           give the guest FILE as its NBFT ACPI table. Its HFI
 #                  must be the guest's NIC (GUEST_MAC, 10.0.2.15/24 via
 #                  10.0.2.2); the network setup comes from it, no ip=.
@@ -32,6 +38,9 @@
 set -u
 
 NAME='' TARGET='' UUID='' TREE='' PACKAGE='' MODULE='' HOSTONLY='' APPEND=''
+IDENTITY=1
+# What the last tree installed (meson's install log)
+INSTALLED=/root/lab-boot-installed.txt
 SOURCE=cmdline TIMEOUT=240 NBFT=''
 # The guest's NIC; nvmelab/boot.py writes the same into the HFI of an NBFT.
 GUEST_MAC=52:54:00:12:34:56 GUEST_PCI_DEV=3
@@ -46,6 +55,7 @@ while [ $# -gt 0 ]; do
         --dracut-module) MODULE=$2; shift ;;
         --source) SOURCE=$2; shift ;;
         --hostonly) HOSTONLY=1 ;;
+        --no-host-identity) IDENTITY='' ;;
         --append) APPEND=$2; shift ;;
         --timeout) TIMEOUT=$2; shift ;;
         --nbft) NBFT=$2; shift ;;
@@ -67,7 +77,22 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 fail() { echo "SETUP FAILED: $*" | tee -a "$OUT/log" >&2; exit 2; }
 
+# Remove the files the last tree installed, but not the host identity.
+uninstall_tree() {
+    [ -f "$INSTALLED" ] || return 0
+    grep -v '^#' "$INSTALLED" | while read -r f; do
+        case $f in
+            /etc/nvme/hostnqn | /etc/nvme/hostid) ;;
+            *) rm -f "$f" ;;
+        esac
+    done
+    rm -f "$INSTALLED"
+}
+
 {
+    if [ -n "$TREE" ] || [ -n "$PACKAGE" ]; then
+        uninstall_tree
+    fi
     if [ -n "$TREE" ]; then
         # The tree belongs to root on the host; meson asks git for the
         # version. sysconfdir: Tumbleweed's meson defaults to /usr/etc,
@@ -80,6 +105,7 @@ fail() { echo "SETUP FAILED: $*" | tee -a "$OUT/log" >&2; exit 2; }
         fi
         ninja -C "$TREE/.lab-boot" >/dev/null || exit 2
         meson install -C "$TREE/.lab-boot" --no-rebuild --quiet || exit 2
+        cp "$TREE/.lab-boot/meson-logs/install-log.txt" "$INSTALLED"
         ldconfig
     elif [ -n "$PACKAGE" ]; then
         zypper -q --non-interactive install -y -f nvme-cli || exit 2
@@ -116,9 +142,14 @@ esac
 if [ -n "$HOSTONLY" ]; then
     HO="--hostonly --hostonly-cmdline"
 else
-    HO="--no-hostonly"
-    CMDLINE="$CMDLINE rd.nvmf.hostnqn=$(cat /etc/nvme/hostnqn)"
-    CMDLINE="$CMDLINE rd.nvmf.hostid=$(cat /etc/nvme/hostid)"
+    # --no-hostonly-cmdline: distributions turn hostonly_cmdline on
+    # (Tumbleweed's 01-dist.conf), and dracut then writes the container's
+    # host identity into etc/cmdline.d even without hostonly.
+    HO="--no-hostonly --no-hostonly-cmdline"
+    if [ -n "$IDENTITY" ]; then
+        CMDLINE="$CMDLINE rd.nvmf.hostnqn=$(cat /etc/nvme/hostnqn)"
+        CMDLINE="$CMDLINE rd.nvmf.hostid=$(cat /etc/nvme/hostid)"
+    fi
 fi
 CMDLINE="$CMDLINE $APPEND"
 echo "$CMDLINE" > "$OUT/cmdline"

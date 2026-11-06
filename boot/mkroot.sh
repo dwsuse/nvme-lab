@@ -7,7 +7,8 @@
 # switches only into a root that has one) and an /init that reports what
 # the initrd handed over and powers the guest off. Its report, between
 # LAB-BOOT-STATE-BEGIN and LAB-BOOT-STATE-END, has one line per NVMe
-# controller, "ctrl NAME TRANSPORT SUBSYSNQN", and one per entry of the
+# controller, "ctrl NAME TRANSPORT SUBSYSNQN KEY=VALUE..." with its
+# state, trsvcid, ctrl_loss_tmo and hostnqn, and one per entry of the
 # nvme-cli registry (/run moves along at switch_root), "registry NAME
 # owner=OWNER" (empty: unowned). Then it prints "LAB-BOOT-ROOT-OK <kernel
 # command line>".
@@ -51,10 +52,16 @@ cat > "$MNT/init" <<'EOF'
 #!/bin/sh
 B=/bin/busybox
 $B mount -t proc proc /proc
+# No kernel messages in the middle of the report on the serial console
+echo 1 > /proc/sys/kernel/printk
 echo LAB-BOOT-STATE-BEGIN
+attr() { $B cat "$1/$2" 2>/dev/null | $B tr -d ' \n'; }
 for c in /sys/class/nvme/nvme*; do
     [ -e "$c" ] || continue
-    echo "ctrl ${c##*/} $($B cat "$c/transport") $($B cat "$c/subsysnqn")"
+    trsvcid=$(attr "$c" address | $B sed -n 's/.*trsvcid=\([0-9]*\).*/\1/p')
+    echo "ctrl ${c##*/} $(attr "$c" transport) $(attr "$c" subsysnqn)" \
+        "state=$(attr "$c" state) trsvcid=$trsvcid" \
+        "ctrl_loss_tmo=$(attr "$c" ctrl_loss_tmo) hostnqn=$(attr "$c" hostnqn)"
 done
 for e in /run/nvme/registry/*; do
     [ -d "$e" ] || continue
@@ -62,6 +69,8 @@ for e in /run/nvme/registry/*; do
 done
 echo LAB-BOOT-STATE-END
 echo "LAB-BOOT-ROOT-OK $($B cat /proc/cmdline)"
+# Let the serial line drain: sysrq prints at its own log level
+$B sleep 1
 echo o > /proc/sysrq-trigger
 /bin/busybox sleep 30
 EOF

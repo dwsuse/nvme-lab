@@ -1,0 +1,11 @@
+# The NBFT has two SSNS records for the root subsystem, one per port.
+name = "NBFT boot, two root paths"
+tags = ["nbft", "multipath"]
+
+[boot]
+nbft_ssns = ["{root2}/{root_nqn}"]
+
+[expect]
+result = "pass"
+controllers = ["root"]
+paths = { root = 2 }
