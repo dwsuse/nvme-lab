@@ -22,8 +22,9 @@ $L ssh HOST [COMMAND...]                   # remote shell runs the words
 $L scratch HOST [--rm NAME...]             # list / remove scratch trees
 $L boot setup [--slots N] | run NAME [--slot N] [...] | teardown
                                            # boot QEMU from an NVMe/TCP root
-$L boot test [SCENARIO...] [-j N] [--tag T] [--skip-tag T] [--nvme TREE]
-             [--dracut-module DIR]         # boot scenarios with verdicts
+$L boot test [SCENARIO...] [-j N] [--tag T] [--skip-tag T] [--nvme TREE]...
+             [--dracut-module DIR] [--dashboard [DIR]] [--list]
+                                           # boot scenarios with verdicts
 $L boot nbft FILE [--nbft-ssns ...]        # write the NBFT of a case
 ```
 
@@ -55,56 +56,60 @@ $L boot nbft FILE [--nbft-ssns ...]        # write the NBFT of a case
   has no playwright Python package and no PyPI access.
 - FreeBSD: `lab sync nvme-bsd -n N`, then `meson setup .build && ninja
   -C .build && meson test -C .build` in `/root/scratch/N`.
-- dracut / boot from NVMe/TCP: `lab boot setup` once (container; on
-  nvmet through nvme-target-control from ~/blktests: the `root`
-  subsystem on two ports, paths `root` and `root2`, and an `extra` one),
-  then `lab boot test` for the scenarios of `boot/scenarios/*.toml` (each
-  a case, faults, and expectations: boots or not, which subsystems have
-  how many controllers after switch-root, their registry owners,
-  ctrl_loss_tmo and host NQN; PASS/FAIL/XFAIL/XPASS per scenario, exit 0
-  unless one failed or passed unexpectedly), or `lab boot run NAME [--nvme TREE]
-  [--dracut-module DIR] [--source cmdline|static|legacy|none]
-  [--hostonly]` for one case (RESULT=PASS/FAIL plus the root's report;
-  results in /root/scratch/lab-boot/out/NAME, the report in state.txt).
-  `lab boot teardown` at the end; it removes earlier results too, ask
-  first. A new test case is a new scenario file, not a hand-made run.
-- Parallel boots: `lab boot setup --slots 8` (each slot its own
-  container, subsystems, root fs and host identity), then `lab boot test
-  -j 8`; 8 slots fit the CI host. Repeat `--nvme TREE` for a version
-  matrix in one run (version-specific scenarios only with their trees;
-  `xfail_on` for known bugs of a release).
-- Results for the user to look at: `lab boot test ... --dashboard` renders
-  nvme-cli's dashboard (scripts/dashboard of ~/nvme-cli) with the run
-  added; it prints the file:// URL of the local site
-  (~/.cache/nvme-lab/dashboard/index.html). History accumulates on the
-  CI host in /root/scratch/lab-dashboard.
-- Faults while the guest boots: `--fault KIND:PATH` on `lab boot run` or
-  `[[fault]]` in a scenario: `port-removed` and `ana:STATE` on the target
-  (nvme-target-control), `tcp-refuse` and `tcp-drop` on the CI host's
-  network (nvmf-failover from ~/nvmf-failover, nftables). Put back after
-  the boot, also on failure.
-- nvme-cli versions for dracut changes: master and 3.2, plus 2.16, 2.13
-  and 2.8 (what supported distributions ship; docs/testing.md, "nvme-cli
-  versions"). Sync tags with `lab sync nvme -C ~/nvme-cli -r v2.16 -n
-  v216`, then all trees in one `lab boot test -j 8 --nvme ... --nvme ...`.
-- NBFT boots: `lab boot run NAME --nbft` gives the guest an NBFT that lab
-  generates (nvmelab/nbft.py; QEMU `-acpitable`): HFI = the guest NIC,
-  SSNS = the root. More: `--nbft-ssns [TRADDR:]PORT/NQN[,FLAG...]` or
-  `extra[,FLAG]` (FLAG: nonboot, discovered, separate-dc, available,
-  unavailable), `--nbft-discovery [TRADDR:]PORT`, `--nbft-no-root`.
-  This tests the OS side (dracut, `connect-all --nbft`), not firmware
-  booting from NVMe/TCP. `lab boot nbft FILE` + `nvme nbft show
-  --nbft-path DIR` shows what libnvme reads. Details: docs/testing.md.
 - NVMe/TCP: `nvmet-target add-subsys NQN --no-auth --host HOSTNQN` on
   nvmet (prints the port, from 4421), `nvme connect -t tcp -a nvmet -s
   PORT -n NQN` on nvme, then `disconnect` and `del-subsys`.
+
+## Boot tests (dracut, NVMe/TCP root, NBFT)
+
+`lab boot` boots QEMU guests from an NVMe/TCP root through a dracut
+initrd; a test case is a scenario, `boot/scenarios/*.toml` (how to boot,
+which paths to break, what the root must see after switch-root). The
+how-to is docs/testing.md, "Booting from NVMe/TCP", section "How to
+test"; read it before a run that isn't one of these:
+
+- Set up once, and after a VM reboot: `lab boot setup --slots 8` (8
+  slots, each its own container, subsystems `root` (paths `root`,
+  `root2`) and `extra` on nvmet via nvme-target-control, root fs, host
+  identity). Check `lab scratch nvme` for synced trees first.
+- Trees: `lab sync nvme -C ~/nvme-cli -r v2.16 -n v216` (from a checkout
+  with the tags: sync records the version, which picks scenarios and
+  known failures). Versions for dracut changes: master, 3.2, 2.16,
+  2.13, 2.8 (docs, "nvme-cli versions").
+- A dracut change: `lab boot test -j 8 --nvme master --nvme v32 --nvme
+  v216 --nvme v213 --nvme v28 --dracut-module DIR/modules.d/74nvmf
+  --skip-tag pre-os --dashboard [--dashboard-link 'TEXT=URL']`; ~5 min.
+  `pre-os` scenarios only with dracut's `nvmf-registry-pre-os` branch.
+  Tell the user the printed file:// URL of the dashboard.
+- An nvme-cli change: sync the branch (`-w` for uncommitted changes) as
+  one more `--nvme` tree.
+- One case by hand: `lab boot run NAME` with a scenario's options
+  (`--nbft`, `--nbft-ssns extra,nonboot`, `--fault tcp-refuse:root2`,
+  `--slot N`, ...); `lab boot nbft FILE` + `nvme nbft show --nbft-path`
+  for the table.
+- A failure: `/root/scratch/lab-boot/out/NAME` on nvme (`log`: build or
+  install, exit 2 = could not be set up; `console.txt`; `state.txt`: what
+  the root saw; `cmdline`, `NBFT`, `slot`). Investigate, don't rerun
+  until green; to check flakiness run it alone and as N copies (`-j 8`
+  over copied TOMLs).
+- A new case is a new scenario file, never a hand-made run: `make check`
+  validates the shipped scenarios; known failures get `xfail` or
+  `xfail_on` (releases) with reason and link; XPASS fails the run.
+- `lab boot teardown` removes all results: ask first. The dashboard
+  history (/root/scratch/lab-dashboard) and synced trees survive it.
+- Faults: `port-removed` and `ana:STATE` on the target
+  (nvme-target-control from ~/blktests), `tcp-refuse`/`tcp-drop` on the
+  CI host (nvmf-failover from ~/nvmf-failover, nftables); always put
+  back after the boot.
 
 ## Rules
 
 - Own work only in `/root/scratch/NAME`; `/root/work` belongs to the
   setup. Remove your scratch trees when done (`lab scratch HOST --rm`);
   never remove other trees without asking the user.
-- nvmet: only `add-subsys`/`del-subsys`; leave the default target alone.
+- nvmet: by hand only `add-subsys`/`del-subsys`; leave the default target
+  alone. The subsystems of `lab boot` belong to `lab boot setup` and
+  `teardown` (nvme-target-control, ports from 4430).
 - No keys or secrets in any repo; DH-CHAP/TLS keys are made on the VMs.
 - Report only finished runs, with host and commit; quote the failing
   output. A wrong-looking result is investigated, not retried until green.
