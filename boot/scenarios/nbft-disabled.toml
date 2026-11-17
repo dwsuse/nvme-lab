@@ -1,6 +1,8 @@
-# rd.nvmf.nonbft: the initrd ignores the NBFT, and with no other source
-# it finds no root.
-name = "NBFT ignored with rd.nvmf.nonbft"
+# rd.nvmf.nonbft: the initrd doesn't parse the NBFT, but with no other
+# source the initqueue times out, and its last resort, a plain
+# "nvme connect-all", connects the NBFT's subsystems too: the guest boots
+# from the NBFT's root (dracut-ng/dracut#2820 review).
+name = "NBFT ignored with rd.nvmf.nonbft until the initqueue timeout"
 tags = ["nbft"]
 
 [boot]
@@ -9,4 +11,5 @@ append = ["rd.nvmf.nonbft"]
 timeout = 150
 
 [expect]
-result = "fail"
+result = "pass"
+controllers = ["root"]
