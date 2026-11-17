@@ -1,7 +1,6 @@
 # The pre-OS model's NBFT boot over VLAN 10 with networkd: the HFI keeps
-# its name, nbft0 is an alternative name of it, and networkd makes the
-# VLAN interface nbft0.10 on it (vlan=nbft0.10:nbft0 matches the
-# alternative name). nvme connects through nbft0.10.
+# its name, its .network matches the MAC address and makes the VLAN
+# interface nbft0.10 on it. nvme connects through nbft0.10.
 name = "pre-OS NBFT boot over a VLAN, networkd, no rename"
 tags = ["pre-os", "nbft", "nvme-cli-3", "vlan"]
 
@@ -15,4 +14,4 @@ result = "pass"
 controllers = ["root"]
 owners = { root = "pre-os" }
 host_iface = { root = "nbft0.10" }
-iface_names = { nbft0 = "eth0" }
+iface_names = { nbft0 = "" }

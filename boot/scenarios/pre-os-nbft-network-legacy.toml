@@ -1,9 +1,8 @@
-# The pre-OS model's NBFT boot with network-legacy: the ip= of the HFI
-# names its interface by the MAC address, so the interface keeps its name
-# and has no nbftN at all (dracut, "use the MAC address of an NBFT
-# interface with network-legacy"). nvme connects through eth0 and records
-# it for the OS environment.
-name = "pre-OS NBFT boot with network-legacy, no rename"
+# The pre-OS model's NBFT boot with network-legacy: network-legacy matches
+# interface names only, so dracut renames the HFI's interface to nbft0, as
+# without the pre-OS model. nvme connects through nbft0 and records it for
+# the OS environment, which keeps the name.
+name = "pre-OS NBFT boot with network-legacy, renamed"
 tags = ["pre-os", "nbft", "nvme-cli-3", "network-legacy"]
 
 [boot]
@@ -14,5 +13,5 @@ network = "legacy"
 result = "pass"
 controllers = ["root", "extra"]
 owners = { root = "pre-os", extra = "pre-os" }
-host_iface = { root = "eth0", extra = "eth0" }
-iface_names = { nbft0 = "" }
+host_iface = { root = "nbft0", extra = "nbft0" }
+iface_names = { nbft0 = "nbft0" }
