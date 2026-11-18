@@ -865,6 +865,22 @@ class ScenarioTest(unittest.TestCase):
             "nbft0: interface 'eth0', expected 'nbft0'",
             "nbft1: interface '', expected 'eth1'"])
 
+    def test_initqueue_timeout(self):
+        text = f'ctrl nvme0 tcp {SLOT.root_nqn}\ninitqueue-timeout yes\n'
+        self.assertTrue(scenario.parse_initqueue_timeout(text))
+        self.assertFalse(scenario.parse_initqueue_timeout(
+            f'ctrl nvme0 tcp {SLOT.root_nqn}\n'))
+        state = scenario.parse_state(text)
+        s = scenario.load(self.write('[expect]\ninitqueue_timeout = false\n'))
+        self.assertEqual(scenario.verdict(s, True, state, self.ROLES,
+                                          initqueue_timeout=False), [])
+        self.assertEqual(scenario.verdict(s, True, state, self.ROLES,
+                                          initqueue_timeout=True),
+                         ['the initqueue ran its timeout scripts'])
+        s = scenario.load(self.write('[expect]\n'))
+        self.assertEqual(scenario.verdict(s, True, state, self.ROLES,
+                                          initqueue_timeout=True), [])
+
     GUEST_STATE = ('mounted yes\npoweroff yes\npowered_off yes\n'
                    'shutdown_seconds 4\n'
                    'order umount=30.1 disconnect=30.5 ifdown=31.0\n'

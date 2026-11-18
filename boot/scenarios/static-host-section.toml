@@ -1,0 +1,16 @@
+# nvme-cli 3: the target and the host identity in the host's
+# /etc/nvme/nvme-fabrics.conf, its [Host] section the only identity:
+# there is no /etc/nvme/hostnqn or hostid.
+name = "nvme-fabrics.conf with [Host] in a hostonly initrd"
+tags = ["static", "nvme-cli-3", "hostnqn"]
+
+[boot]
+source = "static-host"
+hostonly = true
+
+[expect]
+result = "pass"
+controllers = ["root"]
+# The initqueue's timeout scripts connect without any check, and boot
+# this case even when the initrd skips the configuration
+initqueue_timeout = false

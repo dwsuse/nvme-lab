@@ -51,7 +51,7 @@ SCRIPTS = Path(__file__).resolve().parent.parent / 'boot'
 # root, for the cases with more than one subsystem) on one
 ROOT_PORTS, EXTRA_PORTS = 2, 1
 ROOT_UUID = 'b0936c83-d08a-4c81-bb63-efc6e619581f'
-SOURCES = ('cmdline', 'static', 'legacy', 'none')
+SOURCES = ('cmdline', 'static', 'static-host', 'legacy', 'none')
 NETWORKS = ('networkd', 'legacy', 'nm')
 
 # The guest's NIC and QEMU's user networking (boot.sh): the HFI of an NBFT
@@ -265,7 +265,7 @@ def run_argv(name, target, tree=None, package=False, module=None,
     directory and NBFT_FILE the table in the container."""
     if source not in SOURCES:
         raise ConfigError(f"bad --source '{source}': {', '.join(SOURCES)}")
-    if source in ('static', 'legacy') and not hostonly:
+    if source in ('static', 'static-host', 'legacy') and not hostonly:
         raise ConfigError(f'--source {source} needs --hostonly: only a '
                           "hostonly initrd carries the host's /etc/nvme")
     if tree and package:
@@ -692,7 +692,8 @@ def test_one(cfg, host, s, tree, slot, name, out, **options):
         errors = scenario.verdict(s, rc == 0, state, slot.roles,
                                   scenario.placeholders(env),
                                   scenario.parse_pre_os_conf(text),
-                                  scenario.parse_iface_names(text))
+                                  scenario.parse_iface_names(text),
+                                  scenario.parse_initqueue_timeout(text))
     # A case that could not be set up is no expected failure
     result, bad = (('FAIL', True) if rc not in (0, 1)
                    else scenario.outcome(s, errors, tree.keys))

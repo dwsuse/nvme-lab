@@ -343,10 +343,13 @@ def parser():
     b.add_argument('--source', choices=boot.SOURCES,
                    help='where the initrd learns the target: cmdline: '
                    'rd.nvmf.discover= (the default); static: '
-                   'nvme-fabrics.conf; legacy: discovery.conf; none: from '
+                   'nvme-fabrics.conf; static-host: the same with the host '
+                   'identity in its [Host] only; legacy: discovery.conf; '
+                   'none: from '
                    'the NBFT (the default with one) or --append')
     b.add_argument('--hostonly', action='store_true',
-                   help='a hostonly initrd (needed by static and legacy)')
+                   help='a hostonly initrd (needed by static, static-host and '
+                   'legacy)')
     b.add_argument('--nic', choices=boot.NICS,
                    help="the guest's NIC: user (QEMU's user network, the "
                    'default) or tap (a tap device on the host, needed for '

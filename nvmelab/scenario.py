@@ -8,7 +8,7 @@ A scenario is a TOML file in boot/scenarios/:
     xfail_on = { "v3.2" = "why this release fails" }   # optional
 
     [boot]                      # the options of 'lab boot run'
-    source = "none"             # cmdline, static, legacy, none
+    source = "none"             # cmdline, static, static-host, legacy, none
     hostonly = false
     host_identity = true        # rd.nvmf.hostnqn/hostid (no hostonly)
     nbft = true
@@ -37,6 +37,7 @@ A scenario is a TOML file in boot/scenarios/:
     pre_os_conf = 1
     host_iface = { root = "eth0" }
     iface_names = { nbft0 = "eth0" }
+    initqueue_timeout = false
 
 Placeholders, in append, nbft_ssns, nbft_discovery and the expected host
 NQNs: {traddr}, {trsvcid} (the root's first path), {root2} (its second
@@ -59,6 +60,9 @@ its address in sysfs ("" for none). iface_names maps the names nbftN to
 the interface the kernel resolves them to: nbftN itself when the initrd
 renamed the interface (dracut's ifname=nbftN:MAC), another one when
 nbftN is an alternative name and the interface kept its name.
+initqueue_timeout says whether dracut's initqueue ran its timeout
+scripts, the last resort that connects without checking anything: false
+for a case that has to connect before.
 
 A scenario with xfail is expected to fail for the reason given: it is
 reported as XFAIL while it does, and as XPASS, a failure, once it passes,
@@ -147,7 +151,8 @@ BOOT_KEYS = {'source': str, 'hostonly': bool, 'host_identity': bool,
              'network': str, 'ip_dev': str, 'nic': str, 'vlan': int}
 EXPECT_KEYS = {'result': str, 'controllers': list, 'paths': dict,
                'owners': dict, 'ctrl_loss_tmo': dict, 'hostnqn': dict,
-               'pre_os_conf': int, 'host_iface': dict, 'iface_names': dict}
+               'pre_os_conf': int, 'host_iface': dict, 'iface_names': dict,
+               'initqueue_timeout': bool}
 FAULT_KEYS = {'kind': str, 'path': str, 'state': str}
 GUEST_KEYS = {'connect': str, 'config': str, 'fstab': str, 'lvm2': bool,
               'wait_online': bool, 'modules_load': bool, 'dirty_mb': int,
@@ -364,12 +369,18 @@ def parse_iface_names(text):
     return names
 
 
+def parse_initqueue_timeout(text):
+    """state.txt: whether the initqueue ran its timeout scripts."""
+    return 'initqueue-timeout yes' in text.splitlines()
+
+
 def verdict(s, passed, state, roles, values=None, pre_os_conf=None,
-            iface_names=None):
+            iface_names=None, initqueue_timeout=False):
     """What is wrong with the run of S (empty: nothing). PASSED: the
     root's /init ran; STATE: parse_state(); ROLES: {nqn: role}; VALUES:
     the placeholders, for the expected host NQNs; PRE_OS_CONF:
-    parse_pre_os_conf(); IFACE_NAMES: parse_iface_names()."""
+    parse_pre_os_conf(); IFACE_NAMES: parse_iface_names();
+    INITQUEUE_TIMEOUT: parse_initqueue_timeout()."""
     errors = []
     want = s.expect.get('result', 'pass')
     if (want == 'pass') != passed:
@@ -409,6 +420,10 @@ def verdict(s, passed, state, roles, values=None, pre_os_conf=None,
         got = (iface_names or {}).get(name, '')
         if got != want:
             errors.append(f"{name}: interface '{got}', expected '{want}'")
+    if s.expect.get('initqueue_timeout', initqueue_timeout) != initqueue_timeout:
+        errors.append('the initqueue ran its timeout scripts'
+                      if initqueue_timeout else
+                      'the initqueue did not run its timeout scripts')
     return errors
 
 

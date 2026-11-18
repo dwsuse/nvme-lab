@@ -25,6 +25,9 @@
 # --source         where the initrd learns the target from:
 #   cmdline  rd.nvmf.discover= on the kernel command line (default)
 #   static   /etc/nvme/nvme-fabrics.conf (nvme-cli 3), needs --hostonly
+#   static-host  the same, the host identity only in its [Host]: the
+#            container's /etc/nvme/hostnqn and hostid are moved aside
+#            while dracut runs
 #   legacy   /etc/nvme/discovery.conf (nvme-cli 2), needs --hostonly
 #   none     nothing: give it with --append
 # --hostonly       a hostonly initrd: it carries the container's
@@ -213,6 +216,14 @@ if [ -x "$NM_GEN" ]; then
         "$NM_GEN" || fail "no nm-initrd-generator $NM_GENERATOR"
 fi
 
+# The host identity an interrupted static-host boot left aside
+restore_identity() {
+    for f in hostnqn hostid; do
+        [ ! -e "/etc/nvme/$f.lab-aside" ] \
+            || mv -f "/etc/nvme/$f.lab-aside" "/etc/nvme/$f"
+    done
+}
+restore_identity
 rm -rf /etc/nvme/discovery.conf /etc/nvme/config.json \
     /etc/nvme/nvme-fabrics.conf /etc/nvme/nvme-fabrics.conf.d \
     /etc/nvme/*.converted
@@ -238,6 +249,14 @@ case $SOURCE in
     static)
         printf '[Discovery Controller]\ncontroller = transport=tcp;traddr=%s;trsvcid=%s\n' \
             "$TRADDR" "$TRSVCID" > /etc/nvme/nvme-fabrics.conf ;;
+    static-host)
+        printf '[Host]\nhostnqn = %s\nhostid = %s\n\n' \
+            "$(cat /etc/nvme/hostnqn)" "$(cat /etc/nvme/hostid)" \
+            > /etc/nvme/nvme-fabrics.conf
+        printf '[Discovery Controller]\ncontroller = transport=tcp;traddr=%s;trsvcid=%s\n' \
+            "$TRADDR" "$TRSVCID" >> /etc/nvme/nvme-fabrics.conf
+        mv /etc/nvme/hostnqn /etc/nvme/hostnqn.lab-aside
+        mv /etc/nvme/hostid /etc/nvme/hostid.lab-aside ;;
     legacy)
         echo "--transport=tcp --traddr=$TRADDR --trsvcid=$TRSVCID" \
             > /etc/nvme/discovery.conf ;;
@@ -268,8 +287,10 @@ echo "$CMDLINE" > "$OUT/cmdline"
 # shellcheck disable=SC2086
 dracut --force $HO --add "nvmf $NETMOD" \
     --add-drivers "nvme_tcp nvme_fabrics virtio_net virtio_pci ext4" \
-    --kver "$KVER" "$OUT/initrd.img" > "$OUT/dracut.log" 2>&1 \
-    || fail "dracut, see $OUT/dracut.log"
+    --kver "$KVER" "$OUT/initrd.img" > "$OUT/dracut.log" 2>&1
+RC=$?
+restore_identity
+[ "$RC" = 0 ] || fail "dracut, see $OUT/dracut.log"
 lsinitrd "$OUT/initrd.img" > "$OUT/lsinitrd.txt" 2>&1
 
 if [ -n "$NBFT" ]; then
@@ -310,6 +331,10 @@ timeout "$TIMEOUT" qemu-system-x86_64 -enable-kvm -m 1024 -smp 2 \
 # The report of the root's /init (mkroot.sh), without the console's CRs
 sed -n '/LAB-BOOT-STATE-BEGIN/,/LAB-BOOT-STATE-END/p' "$OUT/console.txt" \
     | tr -d '\r' | sed '/LAB-BOOT-STATE-/d' > "$OUT/state.txt"
+# The initrd connected only from its initqueue timeout scripts, the last
+# resort (nvmf-autoconnect.sh timeout: connect-all without any check)
+! grep -a -q 'dracut-initqueue: starting timeout scripts' "$OUT/console.txt" \
+    || echo "initqueue-timeout yes" >> "$OUT/state.txt"
 if grep -a -q LAB-BOOT-ROOT-OK "$OUT/console.txt"; then
     # 75 MB per case fill the disk in a few matrix runs: a passed case
     # keeps lsinitrd.txt, a failed one its initrd too
